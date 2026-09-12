@@ -1,0 +1,319 @@
+name: Temporary Windows 11 RDP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+
+      # ---------------------------------------------------------
+      # 1. Basic machine information
+      # ---------------------------------------------------------
+      - name: Check host
+        shell: bash
+        run: |
+          set -eux
+
+          echo "===== HOST ====="
+          uname -a
+          echo
+
+          echo "===== CPU ====="
+          lscpu
+          echo
+
+          echo "===== MEMORY ====="
+          free -h
+          echo
+
+          echo "===== ARCHITECTURE ====="
+          uname -m
+          dpkg --print-architecture
+          echo
+
+          echo "===== KVM ====="
+          if [ -e /dev/kvm ]; then
+            ls -l /dev/kvm || true
+
+            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+              echo "KVM_DEVICE=usable"
+            else
+              echo "KVM_DEVICE=not-usable"
+            fi
+          else
+            echo "KVM_DEVICE=missing"
+          fi
+
+      # ---------------------------------------------------------
+      # 2. Install everything QEMU needs
+      # ---------------------------------------------------------
+      - name: Install VM software
+        shell: bash
+        run: |
+          set -eux
+
+          sudo apt-get update
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            qemu-system-x86 \
+            qemu-utils \
+            ovmf \
+            swtpm \
+            swtpm-tools \
+            xorriso \
+            wimtools \
+            p7zip-full \
+            curl \
+            wget \
+            unzip \
+            ca-certificates \
+            netcat-openbsd \
+            socat \
+            openssh-client \
+            iproute2 \
+            lsof \
+            procps
+
+      # ---------------------------------------------------------
+      # 3. Verify QEMU
+      # ---------------------------------------------------------
+      - name: Verify QEMU
+        shell: bash
+        run: |
+          set -eux
+
+          qemu-system-x86_64 --version
+          swtpm --version
+          xorriso -version
+
+          echo
+          echo "===== QEMU LIBRARIES ====="
+          ldd "$(command -v qemu-system-x86_64)" | grep "not found" && exit 1 || true
+
+      # ---------------------------------------------------------
+      # 4. Download genuine Microsoft Windows ISO
+      # ---------------------------------------------------------
+      - name: Download Windows ISO
+        shell: bash
+        env:
+          WINDOWS_ISO_URL: ${{ secrets.WINDOWS_ISO_URL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WINDOWS_ISO_URL:-}" ]; then
+            echo "::error::WINDOWS_ISO_URL secret is missing."
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/windows"
+
+          echo "Downloading Windows ISO..."
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 5 \
+            --connect-timeout 30 \
+            --output "$RUNNER_TEMP/windows/windows.iso" \
+            "$WINDOWS_ISO_URL"
+
+          echo
+          echo "ISO size:"
+          du -h "$RUNNER_TEMP/windows/windows.iso"
+
+          echo
+          echo "ISO SHA256:"
+          sha256sum "$RUNNER_TEMP/windows/windows.iso"
+
+      # ---------------------------------------------------------
+      # 5. Prepare VM files
+      # ---------------------------------------------------------
+      - name: Prepare VM
+        shell: bash
+        run: |
+          set -eux
+
+          VM="$RUNNER_TEMP/windows-vm"
+
+          mkdir -p "$VM"
+
+          echo "Creating virtual hard disk..."
+
+          qemu-img create \
+            -f qcow2 \
+            "$VM/windows.qcow2" \
+            50G
+
+          echo "Creating UEFI variables..."
+
+          cp \
+            /usr/share/OVMF/OVMF_VARS_4M.fd \
+            "$VM/OVMF_VARS.fd"
+
+          echo "Creating TPM state..."
+
+          mkdir -p "$VM/tpm"
+
+          swtpm_setup \
+            --tpmstate "$VM/tpm" \
+            --tpm2 \
+            --create-ek-cert \
+            --create-platform-cert \
+            --lock-nvram
+
+          echo "VM prepared."
+
+      # ---------------------------------------------------------
+      # 6. Check whether KVM works
+      # ---------------------------------------------------------
+      - name: Select acceleration
+        shell: bash
+        run: |
+          set -e
+
+          if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo "KVM is available."
+
+            if timeout 5 bash -c 'exec 3<>/dev/kvm'; then
+              echo "Using KVM."
+              echo "ACCEL=-enable-kvm" >> "$GITHUB_ENV"
+              echo "CPU=host" >> "$GITHUB_ENV"
+            else
+              echo "KVM exists but cannot be opened."
+              echo "Falling back to software emulation."
+              echo "ACCEL=-accel tcg,thread=multi" >> "$GITHUB_ENV"
+              echo "CPU=max" >> "$GITHUB_ENV"
+            fi
+          else
+            echo "KVM unavailable."
+            echo "Falling back to software emulation."
+            echo "ACCEL=-accel tcg,thread=multi" >> "$GITHUB_ENV"
+            echo "CPU=max" >> "$GITHUB_ENV"
+          fi
+
+      # ---------------------------------------------------------
+      # 7. Start virtual TPM
+      # ---------------------------------------------------------
+      - name: Start TPM
+        shell: bash
+        run: |
+          set -eux
+
+          VM="$RUNNER_TEMP/windows-vm"
+
+          swtpm socket \
+            --tpm2 \
+            --tpmstate dir="$VM/tpm" \
+            --ctrl type=unixio,path="$VM/tpm/swtpm.sock" \
+            --daemon
+
+          sleep 2
+
+          test -S "$VM/tpm/swtpm.sock"
+
+          echo "Virtual TPM is running."
+
+      # ---------------------------------------------------------
+      # 8. Boot Windows installer
+      # ---------------------------------------------------------
+      - name: Start Windows VM
+        shell: bash
+        run: |
+          set -eux
+
+          VM="$RUNNER_TEMP/windows-vm"
+
+          qemu-system-x86_64 \
+            $ACCEL \
+            -machine q35 \
+            -cpu "$CPU" \
+            -smp 2 \
+            -m 6G \
+            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+            -drive if=pflash,format=raw,file="$VM/OVMF_VARS.fd" \
+            -drive file="$VM/windows.qcow2",format=qcow2,if=ide \
+            -cdrom "$RUNNER_TEMP/windows/windows.iso" \
+            -chardev socket,id=chrtpm,path="$VM/tpm/swtpm.sock" \
+            -tpmdev emulator,id=tpm0,chardev=chrtpm \
+            -device tpm-tis,tpmdev=tpm0 \
+            -nic user,model=e1000,hostfwd=tcp:127.0.0.1:3389-:3389 \
+            -display none \
+            -serial file:"$VM/qemu-serial.log" \
+            -monitor file:"$VM/qemu-monitor.log" \
+            -daemonize \
+            -pidfile "$VM/qemu.pid"
+
+          echo "QEMU started."
+
+          sleep 5
+
+          if [ ! -f "$VM/qemu.pid" ]; then
+            echo "::error::QEMU did not start."
+            exit 1
+          fi
+
+          if ! kill -0 "$(cat "$VM/qemu.pid")" 2>/dev/null; then
+            echo "::error::QEMU died immediately."
+
+            echo "===== SERIAL LOG ====="
+            cat "$VM/qemu-serial.log" || true
+
+            echo "===== MONITOR LOG ====="
+            cat "$VM/qemu-monitor.log" || true
+
+            exit 1
+          fi
+
+          echo "QEMU is alive."
+
+      # ---------------------------------------------------------
+      # 9. Keep the VM alive
+      # ---------------------------------------------------------
+      - name: Wait for Windows
+        shell: bash
+        run: |
+          set -e
+
+          echo "Windows has been started."
+
+          echo
+          echo "IMPORTANT:"
+          echo "The Windows installer is currently running."
+          echo
+          echo "This first version intentionally stops here."
+          echo "The next stage must perform the unattended Windows installation"
+          echo "and enable RDP."
+
+          echo
+          echo "VM will remain alive for troubleshooting."
+
+          while kill -0 "$(cat "$RUNNER_TEMP/windows-vm/qemu.pid")" 2>/dev/null; do
+            sleep 30
+          done
+
+      # ---------------------------------------------------------
+      # 10. Cleanup
+      # ---------------------------------------------------------
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          VM="$RUNNER_TEMP/windows-vm"
+
+          if [ -f "$VM/qemu.pid" ]; then
+            kill "$(cat "$VM/qemu.pid")" 2>/dev/null || true
+          fi
+
+          pkill -f swtpm 2>/dev/null || true
+
+          echo "Cleanup complete."
