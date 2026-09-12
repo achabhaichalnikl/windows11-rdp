@@ -1,4 +1,4 @@
-name: Windows 11 RDP - TCG + Pinggy
+name: Windows 11 RDP - TCG + Tailscale
 
 on:
   workflow_dispatch:
@@ -28,16 +28,11 @@ jobs:
             curl \
             wget \
             netcat-openbsd \
-            openssh-client \
             libxml2-utils
 
       - name: Check runner
         run: |
           set -euxo pipefail
-
-          echo "======================================"
-          echo "RUNNER INFORMATION"
-          echo "======================================"
 
           echo "CPU:"
           nproc
@@ -80,16 +75,14 @@ jobs:
             exit 1
           fi
 
-          curl \
-            -L \
+          curl -L \
             --fail \
             --retry 5 \
             --retry-delay 5 \
             -o "$HOME/windows-rdp/windows.iso" \
             "$WINDOWS_ISO_URL"
 
-          echo
-          echo "Downloaded Windows ISO:"
+          echo "Windows ISO downloaded:"
           ls -lh "$HOME/windows-rdp/windows.iso"
 
       - name: Extract Windows ISO
@@ -103,7 +96,6 @@ jobs:
 
           test -f "$HOME/windows-rdp/iso/sources/install.wim"
 
-          echo
           echo "install.wim found."
 
       - name: Verify Windows 11 Pro
@@ -115,27 +107,19 @@ jobs:
 
           wimlib-imagex info "$WIM" > "$WORK/wim-info.txt"
 
-          echo "======================================"
-          echo "WIM INFORMATION"
-          echo "======================================"
-
           cat "$WORK/wim-info.txt"
 
           if ! grep -q '^Index:[[:space:]]*6$' "$WORK/wim-info.txt"; then
-            echo "ERROR: Index 6 was not found."
+            echo "ERROR: Windows 11 Pro index 6 was not found."
             exit 1
           fi
 
           PRO_NAME="$(
             awk '
-              /^Index:/ {
-                idx=$2
-              }
-
+              /^Index:/ { idx=$2 }
               /^Name:/ {
                 name=$0
                 sub(/^Name:[[:space:]]*/, "", name)
-
                 if (idx == 6) {
                   print name
                   exit
@@ -144,16 +128,12 @@ jobs:
             ' "$WORK/wim-info.txt"
           )"
 
-          echo
-          echo "Index 6 = $PRO_NAME"
+          echo "Selected edition: $PRO_NAME"
 
           if [ "$PRO_NAME" != "Windows 11 Pro" ]; then
             echo "ERROR: Index 6 is not Windows 11 Pro."
             exit 1
           fi
-
-          echo
-          echo "Windows 11 Pro confirmed."
 
       - name: Create Autounattend.xml
         env:
@@ -206,7 +186,6 @@ jobs:
                 versionScope="nonSxS">
 
                 <ImageInstall>
-
                   <OSImage>
 
                     <InstallFrom>
@@ -228,7 +207,6 @@ jobs:
                     </InstallTo>
 
                   </OSImage>
-
                 </ImageInstall>
 
                 <DiskConfiguration>
@@ -340,12 +318,14 @@ jobs:
                 versionScope="nonSxS">
 
                 <OOBE>
+
                   <HideEULAPage>true</HideEULAPage>
                   <HideLocalAccountScreen>true</HideLocalAccountScreen>
                   <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
                   <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
                   <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
                   <ProtectYourPC>3</ProtectYourPC>
+
                 </OOBE>
 
                 <UserAccounts>
@@ -358,432 +338,3 @@ jobs:
 
                       <Name>rdpuser</Name>
                       <DisplayName>RDP User</DisplayName>
-                      <Group>Administrators</Group>
-
-                      <Password>
-                        <Value>$PASSWORD_B64</Value>
-                        <PlainText>false</PlainText>
-                      </Password>
-
-                    </LocalAccount>
-
-                  </LocalAccounts>
-
-                </UserAccounts>
-
-                <AutoLogon>
-
-                  <Enabled>true</Enabled>
-                  <Username>rdpuser</Username>
-
-                  <Password>
-                    <Value>$PASSWORD_B64</Value>
-                    <PlainText>false</PlainText>
-                  </Password>
-
-                  <LogonCount>1</LogonCount>
-
-                </AutoLogon>
-
-              </component>
-
-            </settings>
-
-            <cpi:offlineImage
-              cpi:source="wim:/sources/install.wim#Windows 11 Pro"
-              xmlns:cpi="urn:schemas-microsoft-com:cpi" />
-
-          </unattend>
-          EOF
-
-          xmllint --noout "$WORK/Autounattend.xml"
-
-          echo "Autounattend.xml is valid."
-
-      - name: Create unattended ISO
-        run: |
-          set -euxo pipefail
-
-          WORK="$HOME/windows-rdp/work"
-
-          xorriso \
-            -as mkisofs \
-            -iso-level 3 \
-            -J \
-            -R \
-            -V "AUTOUNATTEND" \
-            -o "$WORK/autounattend.iso" \
-            "$WORK"
-
-          ls -lh "$WORK/autounattend.iso"
-
-      - name: Create Windows disk
-        run: |
-          set -euxo pipefail
-
-          qemu-img create \
-            -f qcow2 \
-            "$HOME/windows-rdp/work/windows.qcow2" \
-            64G
-
-          qemu-img info \
-            "$HOME/windows-rdp/work/windows.qcow2"
-
-      - name: Prepare UEFI
-        run: |
-          set -euxo pipefail
-
-          CODE=""
-
-          for f in \
-            /usr/share/OVMF/OVMF_CODE_4M.ms.fd \
-            /usr/share/OVMF/OVMF_CODE_4M.secboot.fd \
-            /usr/share/OVMF/OVMF_CODE.fd
-          do
-            if [ -f "$f" ]; then
-              CODE="$f"
-              break
-            fi
-          done
-
-          VARS=""
-
-          for f in \
-            /usr/share/OVMF/OVMF_VARS_4M.ms.fd \
-            /usr/share/OVMF/OVMF_VARS_4M.fd \
-            /usr/share/OVMF/OVMF_VARS.fd
-          do
-            if [ -f "$f" ]; then
-              VARS="$f"
-              break
-            fi
-          done
-
-          if [ -z "$CODE" ] || [ -z "$VARS" ]; then
-            echo "ERROR: OVMF firmware not found."
-            exit 1
-          fi
-
-          cp "$CODE" \
-            "$HOME/windows-rdp/ovmf/OVMF_CODE.fd"
-
-          cp "$VARS" \
-            "$HOME/windows-rdp/ovmf/OVMF_VARS.fd"
-
-          echo "OVMF_CODE=$HOME/windows-rdp/ovmf/OVMF_CODE.fd" >> "$GITHUB_ENV"
-          echo "OVMF_VARS=$HOME/windows-rdp/ovmf/OVMF_VARS.fd" >> "$GITHUB_ENV"
-
-      - name: Start TPM 2.0
-        run: |
-          set -euxo pipefail
-
-          mkdir -p "$HOME/windows-rdp/work/tpm"
-
-          swtpm socket \
-            --tpm2 \
-            --tpmstate dir="$HOME/windows-rdp/work/tpm" \
-            --ctrl type=unixio,path="$HOME/windows-rdp/work/swtpm.sock" \
-            --daemon
-
-          sleep 2
-
-          test -S "$HOME/windows-rdp/work/swtpm.sock"
-
-          echo "TPM 2.0 running."
-
-      - name: Start Windows VM
-        run: |
-          set -euxo pipefail
-
-          WORK="$HOME/windows-rdp/work"
-
-          echo "======================================"
-          echo "STARTING REAL WINDOWS 11"
-          echo "======================================"
-
-          echo "Using QEMU TCG software emulation."
-
-          qemu-system-x86_64 \
-            -accel tcg,thread=multi \
-            -machine q35 \
-            -cpu max \
-            -m 8G \
-            -smp 4 \
-            -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
-            -drive if=pflash,format=raw,file="$OVMF_VARS" \
-            -chardev socket,id=chrtpm,path="$WORK/swtpm.sock" \
-            -tpmdev emulator,id=tpm0,chardev=chrtpm \
-            -device tpm-tis,tpmdev=tpm0 \
-            -drive file="$WORK/windows.qcow2",format=qcow2,if=ide \
-            -drive file="$HOME/windows-rdp/windows.iso",media=cdrom,readonly=on \
-            -drive file="$WORK/autounattend.iso",media=cdrom,readonly=on \
-            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:3389-:3389 \
-            -device e1000,netdev=net0 \
-            -boot once=d \
-            -display none \
-            -serial file:"$WORK/qemu-serial.log" \
-            -monitor unix:"$WORK/qemu-monitor.sock",server=on,wait=off \
-            -pidfile "$WORK/qemu.pid" \
-            -daemonize
-
-          sleep 5
-
-          if [ ! -f "$WORK/qemu.pid" ]; then
-            echo "ERROR: QEMU failed to start."
-            cat "$WORK/qemu-serial.log" || true
-            exit 1
-          fi
-
-          QEMU_PID="$(cat "$WORK/qemu.pid")"
-
-          if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-            echo "ERROR: QEMU stopped."
-
-            echo "===== QEMU LOG ====="
-            cat "$WORK/qemu-serial.log" || true
-
-            exit 1
-          fi
-
-          echo
-          echo "Windows VM is running."
-          echo "QEMU PID: $QEMU_PID"
-
-      - name: Wait for RDP
-        run: |
-          set -euxo pipefail
-
-          WORK="$HOME/windows-rdp/work"
-
-          echo "Waiting for Windows to finish installing..."
-
-          for i in $(seq 1 90); do
-
-            QEMU_PID="$(cat "$WORK/qemu.pid")"
-
-            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-              echo "ERROR: Windows VM stopped."
-
-              echo "===== QEMU LOG ====="
-              cat "$WORK/qemu-serial.log" || true
-
-              exit 1
-            fi
-
-            if nc -z 127.0.0.1 3389; then
-              echo
-              echo "======================================"
-              echo "RDP PORT IS OPEN"
-              echo "======================================"
-
-              exit 0
-            fi
-
-            echo "[$i/90] RDP not ready..."
-
-            sleep 40
-
-          done
-
-          echo "ERROR: RDP did not become available."
-
-          echo "===== QEMU LOG ====="
-          cat "$WORK/qemu-serial.log" || true
-
-          exit 1
-
-      - name: Start public RDP tunnel
-        run: |
-          set -euo pipefail
-
-          WORK="$HOME/windows-rdp/work"
-
-          echo
-          echo "======================================"
-          echo "STARTING PUBLIC RDP TUNNEL"
-          echo "======================================"
-
-          echo "Local RDP:"
-          echo "127.0.0.1:3389"
-
-          echo
-          echo "Starting Pinggy..."
-
-          rm -f "$WORK/pinggy.log"
-
-          ssh \
-            -o StrictHostKeyChecking=no \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=3 \
-            -o ExitOnForwardFailure=yes \
-            -p 443 \
-            -R0:127.0.0.1:3389 \
-            tcp@free.pinggy.io \
-            > "$WORK/pinggy.log" 2>&1 &
-
-          PINGGY_PID=$!
-
-          echo "$PINGGY_PID" > "$WORK/pinggy.pid"
-
-          echo
-          echo "Waiting for Pinggy to provide the public address..."
-
-          PUBLIC_ADDRESS=""
-
-          for i in $(seq 1 30); do
-
-            sleep 2
-
-            cat "$WORK/pinggy.log" || true
-
-            PUBLIC_ADDRESS="$(
-              grep -Eo \
-                'tcp://[^[:space:]]+:[0-9]+' \
-                "$WORK/pinggy.log" |
-              head -n 1 ||
-              true
-            )"
-
-            if [ -n "$PUBLIC_ADDRESS" ]; then
-              break
-            fi
-
-            if ! kill -0 "$PINGGY_PID" 2>/dev/null; then
-              echo
-              echo "ERROR: Pinggy process stopped."
-
-              echo
-              echo "===== PINGGY LOG ====="
-              cat "$WORK/pinggy.log" || true
-
-              exit 1
-            fi
-
-            echo "[$i/30] Waiting for public address..."
-
-          done
-
-          if [ -z "$PUBLIC_ADDRESS" ]; then
-            echo
-            echo "ERROR: Pinggy did not provide a public TCP address."
-
-            echo
-            echo "===== PINGGY LOG ====="
-            cat "$WORK/pinggy.log" || true
-
-            exit 1
-          fi
-
-          RDP_ADDRESS="${PUBLIC_ADDRESS#tcp://}"
-
-          echo
-          echo "======================================"
-          echo "PUBLIC RDP ADDRESS"
-          echo "======================================"
-
-          echo
-          echo "$RDP_ADDRESS"
-
-          echo
-          echo "======================================"
-          echo "RDP USERNAME"
-          echo "======================================"
-
-          echo
-          echo "rdpuser"
-
-          echo
-          echo "======================================"
-          echo "RDP PASSWORD"
-          echo "======================================"
-
-          echo
-          echo "Use the password stored in your RDP_PASSWORD GitHub secret."
-
-          echo
-          echo "======================================"
-          echo "ANDROID RDP"
-          echo "======================================"
-
-          echo
-          echo "Enter this as the PC address:"
-          echo "$RDP_ADDRESS"
-
-          echo
-          echo "Do NOT include tcp://"
-
-          echo "$RDP_ADDRESS" > "$WORK/rdp-address.txt"
-
-      - name: Keep VM and tunnel alive
-        run: |
-          set -euxo pipefail
-
-          WORK="$HOME/windows-rdp/work"
-
-          echo
-          echo "======================================"
-          echo "WINDOWS 11 RDP IS READY"
-          echo "======================================"
-
-          echo
-          echo "Public RDP address:"
-          cat "$WORK/rdp-address.txt"
-
-          echo
-          echo "Username: rdpuser"
-
-          echo
-          echo "Keeping Windows and Pinggy alive..."
-
-          for i in $(seq 1 150); do
-
-            QEMU_PID="$(cat "$WORK/qemu.pid")"
-
-            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-              echo "ERROR: Windows VM stopped."
-
-              echo "===== QEMU LOG ====="
-              cat "$WORK/qemu-serial.log" || true
-
-              exit 1
-            fi
-
-            if [ -f "$WORK/pinggy.pid" ]; then
-              PINGGY_PID="$(cat "$WORK/pinggy.pid")"
-
-              if ! kill -0 "$PINGGY_PID" 2>/dev/null; then
-                echo "ERROR: Pinggy tunnel stopped."
-
-                echo "===== PINGGY LOG ====="
-                cat "$WORK/pinggy.log" || true
-
-                exit 1
-              fi
-            fi
-
-            echo "Windows + RDP tunnel alive: $i/150"
-
-            sleep 20
-
-          done
-
-      - name: Cleanup
-        if: always()
-        run: |
-          set +e
-
-          WORK="$HOME/windows-rdp/work"
-
-          if [ -f "$WORK/pinggy.pid" ]; then
-            PINGGY_PID="$(cat "$WORK/pinggy.pid")"
-            kill "$PINGGY_PID" 2>/dev/null || true
-          fi
-
-          if [ -f "$WORK/qemu.pid" ]; then
-            QEMU_PID="$(cat "$WORK/qemu.pid")"
-            kill "$QEMU_PID" 2>/dev/null || true
-          fi
-
-          pkill -f swtpm 2>/dev/null || true
-
-          echo "Cleanup complete."
