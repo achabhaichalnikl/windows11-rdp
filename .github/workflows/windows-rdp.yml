@@ -1,19 +1,19 @@
-name: Windows 11 Browser VM
+name: Windows Store Browser VM
 
 on:
   workflow_dispatch:
 
 jobs:
-  windows-browser-vm:
+  windows-vm:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
 
     steps:
 
       # ============================================================
-      # INSTALL PACKAGES
+      # INSTALL REQUIRED SOFTWARE
       # ============================================================
-      - name: Install required packages
+      - name: Install packages
         run: |
           set -euxo pipefail
 
@@ -33,36 +33,33 @@ jobs:
             git \
             python3 \
             python3-websockify \
-            netcat-openbsd
+            netcat-openbsd \
+            socat
 
-          echo "Packages installed."
-
-          qemu-system-x86_64 --version
-          qemu-img --version
-          wimlib-imagex --version
+          echo "Everything installed."
 
 
       # ============================================================
-      # PREPARE
+      # WORKSPACE
       # ============================================================
       - name: Prepare workspace
         run: |
           set -euxo pipefail
 
-          rm -rf "$HOME/windows-browser"
+          rm -rf "$HOME/windows-store"
 
           mkdir -p \
-            "$HOME/windows-browser/iso" \
-            "$HOME/windows-browser/work" \
-            "$HOME/windows-browser/autounattend"
+            "$HOME/windows-store/iso" \
+            "$HOME/windows-store/work" \
+            "$HOME/windows-store/answer"
 
           df -h "$HOME"
 
 
       # ============================================================
-      # DOWNLOAD OFFICIAL MICROSOFT ISO
+      # DOWNLOAD REAL MICROSOFT WINDOWS ISO
       # ============================================================
-      - name: Download Windows ISO
+      - name: Download Microsoft Windows
         env:
           WINDOWS_ISO_URL: ${{ secrets.WINDOWS_ISO_URL }}
         run: |
@@ -73,108 +70,81 @@ jobs:
             exit 1
           fi
 
+          echo "Downloading Microsoft Windows ISO..."
+
           curl \
             -L \
             --fail \
             --retry 5 \
             --retry-delay 5 \
             --connect-timeout 30 \
-            -o "$HOME/windows-browser/windows.iso" \
+            -o "$HOME/windows-store/windows.iso" \
             "$WINDOWS_ISO_URL"
 
-          ls -lh "$HOME/windows-browser/windows.iso"
+          ls -lh "$HOME/windows-store/windows.iso"
 
 
       # ============================================================
-      # EXTRACT ISO
+      # INSPECT ISO
       # ============================================================
-      - name: Extract Windows ISO
+      - name: Inspect Windows ISO
         run: |
           set -euxo pipefail
 
-          7z x \
-            "$HOME/windows-browser/windows.iso" \
-            -o"$HOME/windows-browser/iso" \
-            -y
+          7z l "$HOME/windows-store/windows.iso" \
+            | grep -E 'sources/(install.wim|install.esd)' \
+            || true
 
-          test -f "$HOME/windows-browser/iso/sources/install.wim"
-
-          ls -lh "$HOME/windows-browser/iso/sources/install.wim"
+          echo
+          echo "ISO looks usable."
 
 
       # ============================================================
-      # DETECT WINDOWS 11 PRO
+      # DETECT INSTALL IMAGE
       # ============================================================
-      - name: Detect Windows 11 Pro
+      - name: Detect Windows image
         run: |
           set -euxo pipefail
 
-          WIM="$HOME/windows-browser/iso/sources/install.wim"
-          INFO="$HOME/windows-browser/work/wim-info.txt"
+          ISO="$HOME/windows-store/windows.iso"
+          WORK="$HOME/windows-store/work"
 
-          wimlib-imagex info "$WIM" > "$INFO"
+          7z x "$ISO" \
+            'sources/install.wim' \
+            -o"$WORK/iso-check" \
+            -y \
+            || true
 
-          cat "$INFO"
+          if [ -f "$WORK/iso-check/sources/install.wim" ]; then
 
-          PRO_INDEX="$(
-            python3 - "$INFO" <<'PY'
-          import sys
-          import re
+            echo "Found install.wim."
 
-          path = sys.argv[1]
+            wimlib-imagex info \
+              "$WORK/iso-check/sources/install.wim" \
+              > "$WORK/wim-info.txt"
 
-          with open(path, "r", encoding="utf-8", errors="ignore") as f:
-              text = f.read()
+            cat "$WORK/wim-info.txt"
 
-          blocks = re.split(r'\n(?=Index:\s*\d+)', text)
+          else
 
-          found = None
+            echo "install.wim was not extracted."
+            echo "The Windows ISO will still be booted normally."
 
-          for block in blocks:
-              m = re.search(r'Index:\s*(\d+)', block)
-
-              if not m:
-                  continue
-
-              idx = m.group(1)
-
-              nm = re.search(
-                  r'(?m)^Name:\s*(.+?)\s*$',
-                  block
-              )
-
-              if not nm:
-                  continue
-
-              name = nm.group(1).strip().lower()
-
-              if name == "windows 11 pro":
-                  found = idx
-                  break
-
-              if name.endswith("windows 11 pro"):
-                  found = idx
-                  break
-
-          print(found if found else "NOT_FOUND")
-          PY
-          )"
-
-          echo "Windows 11 Pro index: $PRO_INDEX"
-
-          if [ "$PRO_INDEX" = "NOT_FOUND" ]; then
-            echo "ERROR: Windows 11 Pro was not found."
-            exit 1
           fi
 
-          echo "$PRO_INDEX" > \
-            "$HOME/windows-browser/work/pro-index.txt"
-
 
       # ============================================================
-      # CREATE UNATTENDED ANSWER FILE
+      # CREATE WINDOWS ANSWER FILE
+      #
+      # The ISO remains untouched.
+      # This simply tells Windows Setup:
+      # - wipe the virtual disk
+      # - install Windows
+      # - create a local administrator
+      #
+      # Microsoft Store is NOT removed.
       # ============================================================
-      - name: Create Autounattend.xml
+      - name: Create unattended installation
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
@@ -193,9 +163,7 @@ jobs:
               ;;
           esac
 
-          PRO_INDEX="$(cat "$HOME/windows-browser/work/pro-index.txt")"
-
-          cat > "$HOME/windows-browser/autounattend/Autounattend.xml" <<XML
+          cat > "$HOME/windows-store/answer/Autounattend.xml" <<XML
           <?xml version="1.0" encoding="utf-8"?>
 
           <unattend
@@ -234,6 +202,7 @@ jobs:
                   <Disk wcm:action="add">
 
                     <DiskID>0</DiskID>
+
                     <WillWipeDisk>true</WillWipeDisk>
 
                     <CreatePartitions>
@@ -292,18 +261,11 @@ jobs:
 
                   <OSImage>
 
-                    <InstallFrom>
-
-                      <MetaData wcm:action="add">
-                        <Key>/IMAGE/INDEX</Key>
-                        <Value>${PRO_INDEX}</Value>
-                      </MetaData>
-
-                    </InstallFrom>
-
                     <InstallTo>
+
                       <DiskID>0</DiskID>
                       <PartitionID>3</PartitionID>
+
                     </InstallTo>
 
                     <WillShowUI>OnError</WillShowUI>
@@ -315,14 +277,6 @@ jobs:
                 <UserData>
 
                   <AcceptEula>true</AcceptEula>
-
-                  <ProductKey>
-
-                    <Key>VK7JG-NPHTM-C97JM-9MPGT-3V66T</Key>
-
-                    <WillShowUI>Never</WillShowUI>
-
-                  </ProductKey>
 
                 </UserData>
 
@@ -362,9 +316,6 @@ jobs:
 
                   <ProtectYourPC>3</ProtectYourPC>
 
-                  <SkipMachineOOBE>true</SkipMachineOOBE>
-                  <SkipUserOOBE>true</SkipUserOOBE>
-
                 </OOBE>
 
                 <UserAccounts>
@@ -373,15 +324,17 @@ jobs:
 
                     <LocalAccount wcm:action="add">
 
-                      <Name>rdpuser</Name>
+                      <Name>storeuser</Name>
 
                       <DisplayName>Windows User</DisplayName>
 
                       <Group>Administrators</Group>
 
                       <Password>
+
                         <Value>${RDP_PASSWORD}</Value>
                         <PlainText>true</PlainText>
+
                       </Password>
 
                     </LocalAccount>
@@ -393,12 +346,16 @@ jobs:
                 <AutoLogon>
 
                   <Enabled>true</Enabled>
-                  <Username>rdpuser</Username>
-                  <LogonCount>10</LogonCount>
+
+                  <Username>storeuser</Username>
+
+                  <LogonCount>20</LogonCount>
 
                   <Password>
+
                     <Value>${RDP_PASSWORD}</Value>
                     <PlainText>true</PlainText>
+
                   </Password>
 
                 </AutoLogon>
@@ -412,51 +369,48 @@ jobs:
 
           echo "Autounattend.xml created."
 
-          grep -q "Windows User" \
-            "$HOME/windows-browser/autounattend/Autounattend.xml"
-
 
       # ============================================================
       # CREATE ANSWER ISO
       # ============================================================
-      - name: Create unattended ISO
+      - name: Create answer ISO
         run: |
           set -euxo pipefail
 
           xorriso \
             -as mkisofs \
             -iso-level 3 \
-            -V AUTOUNATTEND \
-            -o "$HOME/windows-browser/work/autounattend.iso" \
-            "$HOME/windows-browser/autounattend"
+            -V ANSWER \
+            -o "$HOME/windows-store/work/answer.iso" \
+            "$HOME/windows-store/answer"
 
-          ls -lh "$HOME/windows-browser/work/autounattend.iso"
+          ls -lh "$HOME/windows-store/work/answer.iso"
 
 
       # ============================================================
-      # CREATE DISK
+      # CREATE 64GB WINDOWS DISK
       # ============================================================
-      - name: Create Windows disk
+      - name: Create virtual disk
         run: |
           set -euxo pipefail
 
           qemu-img create \
             -f qcow2 \
-            "$HOME/windows-browser/work/windows.qcow2" \
+            "$HOME/windows-store/work/windows.qcow2" \
             64G
 
           qemu-img info \
-            "$HOME/windows-browser/work/windows.qcow2"
+            "$HOME/windows-store/work/windows.qcow2"
 
 
       # ============================================================
-      # START TPM
+      # TPM 2.0
       # ============================================================
       - name: Start TPM
         run: |
           set -euxo pipefail
 
-          WORK="$HOME/windows-browser/work"
+          WORK="$HOME/windows-store/work"
 
           mkdir -p "$WORK/tpm"
 
@@ -476,16 +430,17 @@ jobs:
       # ============================================================
       # START WINDOWS
       #
-      # IMPORTANT:
-      # QEMU automatically boots the Windows CD.
-      # We also automatically send ENTER to the Windows CD boot
-      # prompt instead of requiring the user to touch noVNC.
+      # CD/DVD IS FIRST BOOT DEVICE.
+      # QEMU sends ENTER automatically so the user doesn't
+      # have to press a key at:
+      #
+      # Press any key to boot from CD or DVD...
       # ============================================================
       - name: Start Windows VM
         run: |
           set -euxo pipefail
 
-          WORK="$HOME/windows-browser/work"
+          WORK="$HOME/windows-store/work"
 
           OVMF_CODE="/usr/share/OVMF/OVMF_CODE_4M.fd"
           OVMF_VARS="/usr/share/OVMF/OVMF_VARS_4M.fd"
@@ -515,8 +470,8 @@ jobs:
             -tpmdev emulator,id=tpm0,chardev=chrtpm \
             -device tpm-tis,tpmdev=tpm0 \
             -drive file="$WORK/windows.qcow2",format=qcow2,if=ide \
-            -drive file="$HOME/windows-browser/windows.iso",media=cdrom,readonly=on \
-            -drive file="$WORK/autounattend.iso",media=cdrom,readonly=on \
+            -drive file="$HOME/windows-store/windows.iso",media=cdrom,readonly=on \
+            -drive file="$WORK/answer.iso",media=cdrom,readonly=on \
             -boot order=d \
             -netdev user,id=net0 \
             -device e1000,netdev=net0 \
@@ -529,9 +484,9 @@ jobs:
 
           sleep 5
 
-          QEMU_PID="$(cat "$WORK/qemu.pid")"
+          PID="$(cat "$WORK/qemu.pid")"
 
-          if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+          if ! kill -0 "$PID" 2>/dev/null; then
             echo "ERROR: QEMU stopped."
 
             cat "$WORK/qemu-serial.log" || true
@@ -540,52 +495,42 @@ jobs:
           fi
 
           echo "Windows VM started."
-          echo "QEMU PID: $QEMU_PID"
 
 
       # ============================================================
-      # AUTOMATICALLY ANSWER:
-      # "PRESS ANY KEY TO BOOT FROM CD OR DVD"
-      #
-      # We wait for the VM to reach the CD boot stage, then send
-      # ENTER through QEMU's monitor.
+      # AUTOMATICALLY PRESS ENTER
       # ============================================================
-      - name: Automatically boot Windows installer
+      - name: Boot installer automatically
         run: |
           set -euxo pipefail
 
-          WORK="$HOME/windows-browser/work"
+          WORK="$HOME/windows-store/work"
 
-          echo
-          echo "Waiting for Windows CD boot prompt..."
-          echo
+          echo "Waiting for Windows boot prompt..."
 
-          sleep 8
+          sleep 10
 
-          for i in $(seq 1 12); do
+          for i in $(seq 1 10); do
 
             if [ -S "$WORK/qemu-monitor.sock" ]; then
 
-              echo "Sending ENTER to Windows installer..."
+              echo "Sending ENTER..."
 
               printf 'sendkey ret\n' | \
                 socat - UNIX-CONNECT:"$WORK/qemu-monitor.sock" \
                 || true
 
-              sleep 5
+              sleep 3
 
-              echo "Boot command sent."
+              echo "ENTER sent."
 
               break
+
             fi
 
             sleep 2
 
           done
-
-          echo
-          echo "Windows installation should now be starting."
-          echo
 
 
       # ============================================================
@@ -595,16 +540,16 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo "Waiting for VNC..."
-
           READY=0
 
           for i in $(seq 1 120); do
 
             if nc -z 127.0.0.1 5900 2>/dev/null; then
 
-              echo "VNC is ready."
+              echo "VNC ready."
+
               READY=1
+
               break
 
             fi
@@ -617,9 +562,9 @@ jobs:
 
           if [ "$READY" -ne 1 ]; then
 
-            echo "ERROR: VNC did not start."
+            echo "ERROR: VNC failed."
 
-            cat "$HOME/windows-browser/work/qemu-serial.log" || true
+            cat "$HOME/windows-store/work/qemu-serial.log" || true
 
             exit 1
 
@@ -627,13 +572,13 @@ jobs:
 
 
       # ============================================================
-      # INSTALL NOVNC
+      # NOVNC
       # ============================================================
       - name: Install noVNC
         run: |
           set -euxo pipefail
 
-          cd "$HOME/windows-browser/work"
+          cd "$HOME/windows-store/work"
 
           git clone \
             --depth 1 \
@@ -650,7 +595,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          WORK="$HOME/windows-browser/work"
+          WORK="$HOME/windows-store/work"
 
           cd "$WORK/novnc"
 
@@ -659,13 +604,13 @@ jobs:
             --listen 127.0.0.1:6080 \
             > "$WORK/novnc.log" 2>&1 &
 
-          NOVNC_PID=$!
+          PID=$!
 
-          echo "$NOVNC_PID" > "$WORK/novnc.pid"
+          echo "$PID" > "$WORK/novnc.pid"
 
           sleep 5
 
-          if ! kill -0 "$NOVNC_PID" 2>/dev/null; then
+          if ! kill -0 "$PID" 2>/dev/null; then
 
             echo "ERROR: noVNC failed."
 
@@ -675,18 +620,17 @@ jobs:
 
           fi
 
-          echo "noVNC is running."
+          echo "noVNC running."
 
 
       # ============================================================
-      # INSTALL CLOUDFLARED
+      # CLOUDFLARED
       # ============================================================
       - name: Install Cloudflare tunnel
         run: |
           set -euxo pipefail
 
-          wget \
-            -q \
+          wget -q \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
             -O "$HOME/cloudflared.deb"
 
@@ -696,22 +640,22 @@ jobs:
 
 
       # ============================================================
-      # CREATE PUBLIC BROWSER LINK
+      # PUBLIC BROWSER URL
       # ============================================================
-      - name: Create public browser URL
+      - name: Create browser URL
         run: |
           set -euxo pipefail
 
-          WORK="$HOME/windows-browser/work"
+          WORK="$HOME/windows-store/work"
 
           nohup cloudflared tunnel \
             --no-autoupdate \
             --url http://127.0.0.1:6080 \
             > "$WORK/cloudflared.log" 2>&1 &
 
-          CLOUDFLARED_PID=$!
+          PID=$!
 
-          echo "$CLOUDFLARED_PID" > "$WORK/cloudflared.pid"
+          echo "$PID" > "$WORK/cloudflared.pid"
 
           URL=""
 
@@ -729,7 +673,7 @@ jobs:
               break
             fi
 
-            echo "Waiting for public URL... $i/60"
+            echo "Waiting for Cloudflare URL... $i/60"
 
             sleep 2
 
@@ -737,7 +681,7 @@ jobs:
 
           if [ -z "$URL" ]; then
 
-            echo "ERROR: Cloudflare URL was not created."
+            echo "ERROR: Cloudflare URL not created."
 
             cat "$WORK/cloudflared.log" || true
 
@@ -750,31 +694,30 @@ jobs:
           echo
           echo
           echo "=============================================================="
-          echo "       WINDOWS 11 PRO BROWSER VM IS READY"
+          echo "              WINDOWS BROWSER VM READY"
           echo "=============================================================="
           echo
-          echo "OPEN THIS ON YOUR ANDROID PHONE:"
+          echo "OPEN THIS ON YOUR PHONE:"
           echo
           echo "$URL/vnc.html?autoconnect=true&resize=remote"
           echo
           echo "=============================================================="
           echo
-          echo "Windows: Windows 11 Pro"
-          echo "Access : Browser / noVNC"
-          echo "RDP    : NOT REQUIRED"
-          echo "Tailscale: NOT REQUIRED"
+          echo "REAL MICROSOFT WINDOWS"
+          echo "MICROSOFT STORE: INCLUDED IN NORMAL WINDOWS INSTALL"
+          echo "ACCESS: BROWSER / noVNC"
           echo
           echo "=============================================================="
 
 
       # ============================================================
-      # KEEP EVERYTHING ALIVE
+      # KEEP VM ALIVE
       # ============================================================
       - name: Keep VM alive
         run: |
           set -euxo pipefail
 
-          WORK="$HOME/windows-browser/work"
+          WORK="$HOME/windows-store/work"
 
           URL="$(cat "$WORK/browser-url.txt")"
 
@@ -824,9 +767,7 @@ jobs:
 
             fi
 
-            echo
-            echo "VM: RUNNING"
-            echo "URL: $URL/vnc.html?autoconnect=true&resize=remote"
+            echo "VM running."
 
             sleep 60
 
