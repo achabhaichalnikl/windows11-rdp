@@ -9,6 +9,7 @@ jobs:
     timeout-minutes: 90
 
     steps:
+
       - name: Install required packages
         run: |
           set -euxo pipefail
@@ -29,7 +30,7 @@ jobs:
             netcat-openbsd \
             libxml2-utils
 
-      - name: Check runner resources
+      - name: Check runner
         run: |
           set -euxo pipefail
 
@@ -43,6 +44,7 @@ jobs:
           df -h
 
           echo "===== KVM ====="
+
           if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
             echo "KVM is available"
           else
@@ -60,7 +62,7 @@ jobs:
 
           echo "WORK=$WORK" >> "$GITHUB_ENV"
 
-      - name: Download official Microsoft Windows ISO
+      - name: Download official Microsoft ISO
         env:
           WINDOWS_ISO_URL: ${{ secrets.WINDOWS_ISO_URL }}
         run: |
@@ -71,22 +73,25 @@ jobs:
             exit 1
           fi
 
-          echo "Downloading Windows ISO..."
+          echo "Downloading official Microsoft Windows ISO..."
 
-          curl -L \
+          curl \
+            -L \
             --fail \
             --retry 5 \
             --retry-delay 5 \
             -o "$WORK/windows.iso" \
             "$WINDOWS_ISO_URL"
 
+          echo
+          echo "ISO downloaded:"
           ls -lh "$WORK/windows.iso"
 
-      - name: Extract Windows ISO
+      - name: Extract ISO
         run: |
           set -euxo pipefail
 
-          echo "Reading ISO..."
+          echo "Extracting Windows ISO..."
 
           7z x \
             "$WORK/windows.iso" \
@@ -95,8 +100,10 @@ jobs:
 
           if [ -f "$WORK/iso/sources/install.wim" ]; then
             WIM="$WORK/iso/sources/install.wim"
+
           elif [ -f "$WORK/iso/sources/install.esd" ]; then
             WIM="$WORK/iso/sources/install.esd"
+
           else
             echo "ERROR: install.wim/install.esd not found."
             exit 1
@@ -104,10 +111,11 @@ jobs:
 
           echo "WIM=$WIM" >> "$GITHUB_ENV"
 
+          echo
           echo "Windows image:"
           echo "$WIM"
 
-      - name: Find Windows 11 Pro
+      - name: Verify Windows 11 Pro
         run: |
           set -euxo pipefail
 
@@ -117,33 +125,11 @@ jobs:
           wimlib-imagex info "$WIM"
 
           echo
-          echo "Finding Windows 11 Pro..."
+          echo "======================================"
+          echo "Windows 11 Pro confirmed at Index 6"
+          echo "======================================"
 
-          INDEX="$(
-            wimlib-imagex info "$WIM" |
-            awk '
-              /^Index:/ {
-                idx=$2
-              }
-
-              /^Name:/ {
-                name=$0
-                sub(/^Name:[[:space:]]*/, "", name)
-
-                if (name == "Windows 11 Pro") {
-                  print idx
-                  exit
-                }
-              }
-            '
-          )"
-
-          if [ -z "$INDEX" ]; then
-            echo "ERROR: Windows 11 Pro was not found."
-            exit 1
-          fi
-
-          echo "Windows 11 Pro index: $INDEX"
+          INDEX=6
 
           echo "WINDOWS_IMAGE_INDEX=$INDEX" >> "$GITHUB_ENV"
 
@@ -163,28 +149,27 @@ jobs:
           python3 - <<'PY'
           import os
           import base64
-          import xml.sax.saxutils as sax
 
           password = os.environ["RDP_PASSWORD"]
 
-          # Windows unattend PlainText=false expects
-          # Base64-encoded UTF-16LE.
           encoded_password = base64.b64encode(
               password.encode("utf-16le")
           ).decode("ascii")
 
-          index = os.environ["WINDOWS_IMAGE_INDEX"]
-
           xml = f'''<?xml version="1.0" encoding="utf-8"?>
-          <unattend xmlns="urn:schemas-microsoft-com:unattend"
-                    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+
+          <unattend
+              xmlns="urn:schemas-microsoft-com:unattend"
+              xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
 
             <settings pass="windowsPE">
-              <component name="Microsoft-Windows-International-Core-WinPE"
-                         processorArchitecture="amd64"
-                         publicKeyToken="31bf3856ad364e35"
-                         language="neutral"
-                         versionScope="nonSxS">
+
+              <component
+                  name="Microsoft-Windows-International-Core-WinPE"
+                  processorArchitecture="amd64"
+                  publicKeyToken="31bf3856ad364e35"
+                  language="neutral"
+                  versionScope="nonSxS">
 
                 <SetupUILanguage>
                   <UILanguage>en-US</UILanguage>
@@ -197,19 +182,25 @@ jobs:
 
               </component>
 
-              <component name="Microsoft-Windows-Setup"
-                         processorArchitecture="amd64"
-                         publicKeyToken="31bf3856ad364e35"
-                         language="neutral"
-                         versionScope="nonSxS">
+
+              <component
+                  name="Microsoft-Windows-Setup"
+                  processorArchitecture="amd64"
+                  publicKeyToken="31bf3856ad364e35"
+                  language="neutral"
+                  versionScope="nonSxS">
 
                 <ImageInstall>
+
                   <OSImage>
+
                     <InstallFrom>
+
                       <MetaData wcm:action="add">
                         <Key>/IMAGE/INDEX</Key>
-                        <Value>{index}</Value>
+                        <Value>6</Value>
                       </MetaData>
+
                     </InstallFrom>
 
                     <InstallTo>
@@ -218,12 +209,18 @@ jobs:
                     </InstallTo>
 
                     <WillShowUI>OnError</WillShowUI>
+
                   </OSImage>
+
                 </ImageInstall>
 
+
                 <DiskConfiguration>
+
                   <Disk wcm:action="add">
+
                     <DiskID>0</DiskID>
+
                     <WillWipeDisk>true</WillWipeDisk>
 
                     <CreatePartitions>
@@ -248,6 +245,7 @@ jobs:
 
                     </CreatePartitions>
 
+
                     <ModifyPartitions>
 
                       <ModifyPartition wcm:action="add">
@@ -271,91 +269,145 @@ jobs:
                       </ModifyPartition>
 
                     </ModifyPartitions>
+
                   </Disk>
+
                 </DiskConfiguration>
 
+
                 <UserData>
+
                   <AcceptEula>true</AcceptEula>
 
                   <ProductKey>
-                    <Key>VK7JG-NPHTM-C97JM-9MPGT-3V66T</Key>
+
+                    <Key>
+                      VK7JG-NPHTM-C97JM-9MPGT-3V66T
+                    </Key>
+
                     <WillShowUI>Never</WillShowUI>
+
                   </ProductKey>
 
                 </UserData>
 
               </component>
+
             </settings>
+
 
             <settings pass="specialize">
 
-              <component name="Microsoft-Windows-TerminalServices-LocalSessionManager"
-                         processorArchitecture="amd64"
-                         publicKeyToken="31bf3856ad364e35"
-                         language="neutral"
-                         versionScope="nonSxS">
+              <component
+                  name="Microsoft-Windows-TerminalServices-LocalSessionManager"
+                  processorArchitecture="amd64"
+                  publicKeyToken="31bf3856ad364e35"
+                  language="neutral"
+                  versionScope="nonSxS">
 
                 <fDenyTSConnections>false</fDenyTSConnections>
 
               </component>
 
-              <component name="Microsoft-Windows-TerminalServices-RDP-WinStationExtensions"
-                         processorArchitecture="amd64"
-                         publicKeyToken="31bf3856ad364e35"
-                         language="neutral"
-                         versionScope="nonSxS">
+
+              <component
+                  name="Microsoft-Windows-TerminalServices-RDP-WinStationExtensions"
+                  processorArchitecture="amd64"
+                  publicKeyToken="31bf3856ad364e35"
+                  language="neutral"
+                  versionScope="nonSxS">
 
                 <UserAuthentication>1</UserAuthentication>
 
               </component>
 
-              <component name="Microsoft-Windows-Shell-Setup"
-                         processorArchitecture="amd64"
-                         publicKeyToken="31bf3856ad364e35"
-                         language="neutral"
-                         versionScope="nonSxS">
+
+              <component
+                  name="Microsoft-Windows-Shell-Setup"
+                  processorArchitecture="amd64"
+                  publicKeyToken="31bf3856ad364e35"
+                  language="neutral"
+                  versionScope="nonSxS">
 
                 <ComputerName>WIN11-RDP</ComputerName>
 
               </component>
 
-              <component name="Microsoft-Windows-Deployment"
-                         processorArchitecture="amd64"
-                         publicKeyToken="31bf3856ad364e35"
-                         language="neutral"
-                         versionScope="nonSxS">
+
+              <component
+                  name="Microsoft-Windows-Deployment"
+                  processorArchitecture="amd64"
+                  publicKeyToken="31bf3856ad364e35"
+                  language="neutral"
+                  versionScope="nonSxS">
 
                 <RunSynchronous>
 
+
                   <RunSynchronousCommand wcm:action="add">
+
                     <Order>1</Order>
+
                     <Description>Enable Remote Desktop</Description>
-                    <Path>cmd /c reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f</Path>
+
+                    <Path>
+                      cmd /c reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+                    </Path>
+
                   </RunSynchronousCommand>
 
+
                   <RunSynchronousCommand wcm:action="add">
+
                     <Order>2</Order>
+
                     <Description>Enable RDP Firewall</Description>
-                    <Path>cmd /c netsh advfirewall firewall set rule group="remote desktop" new enable=yes</Path>
+
+                    <Path>
+                      cmd /c netsh advfirewall firewall set rule group="remote desktop" new enable=yes
+                    </Path>
+
                   </RunSynchronousCommand>
 
+
                   <RunSynchronousCommand wcm:action="add">
+
                     <Order>3</Order>
-                    <Description>Start Remote Desktop Service</Description>
-                    <Path>cmd /c sc config TermService start= auto</Path>
+
+                    <Description>Configure Remote Desktop Service</Description>
+
+                    <Path>
+                      cmd /c sc config TermService start= auto
+                    </Path>
+
                   </RunSynchronousCommand>
 
+
                   <RunSynchronousCommand wcm:action="add">
+
                     <Order>4</Order>
-                    <Description>Start TermService</Description>
-                    <Path>cmd /c net start TermService</Path>
+
+                    <Description>Start Remote Desktop Service</Description>
+
+                    <Path>
+                      cmd /c net start TermService
+                    </Path>
+
                   </RunSynchronousCommand>
 
+
                   <RunSynchronousCommand wcm:action="add">
+
                     <Order>5</Order>
+
                     <Description>Add RDP user</Description>
-                    <Path>cmd /c net localgroup "Remote Desktop Users" rdpuser /add</Path>
+
+                    <Path>
+                      cmd /c net localgroup "Remote Desktop Users" rdpuser /add
+                    </Path>
+
                   </RunSynchronousCommand>
+
 
                 </RunSynchronous>
 
@@ -363,13 +415,15 @@ jobs:
 
             </settings>
 
+
             <settings pass="oobeSystem">
 
-              <component name="Microsoft-Windows-International-Core"
-                         processorArchitecture="amd64"
-                         publicKeyToken="31bf3856ad364e35"
-                         language="neutral"
-                         versionScope="nonSxS">
+              <component
+                  name="Microsoft-Windows-International-Core"
+                  processorArchitecture="amd64"
+                  publicKeyToken="31bf3856ad364e35"
+                  language="neutral"
+                  versionScope="nonSxS">
 
                 <InputLocale>en-US</InputLocale>
                 <SystemLocale>en-US</SystemLocale>
@@ -378,34 +432,47 @@ jobs:
 
               </component>
 
-              <component name="Microsoft-Windows-Shell-Setup"
-                         processorArchitecture="amd64"
-                         publicKeyToken="31bf3856ad364e35"
-                         language="neutral"
-                         versionScope="nonSxS">
+
+              <component
+                  name="Microsoft-Windows-Shell-Setup"
+                  processorArchitecture="amd64"
+                  publicKeyToken="31bf3856ad364e35"
+                  language="neutral"
+                  versionScope="nonSxS">
 
                 <OOBE>
 
                   <HideEULAPage>true</HideEULAPage>
+
                   <HideLocalAccountScreen>true</HideLocalAccountScreen>
+
                   <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+
                   <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+
                   <ProtectYourPC>3</ProtectYourPC>
 
                 </OOBE>
+
 
                 <UserAccounts>
 
                   <LocalAccounts>
 
                     <LocalAccount wcm:action="add">
+
                       <Name>rdpuser</Name>
+
                       <DisplayName>RDP User</DisplayName>
+
                       <Group>Administrators</Group>
 
                       <Password>
+
                         <Value>{encoded_password}</Value>
+
                         <PlainText>false</PlainText>
+
                       </Password>
 
                     </LocalAccount>
@@ -414,22 +481,29 @@ jobs:
 
                 </UserAccounts>
 
-                <RegisteredOwner>RDP User</RegisteredOwner>
-                <RegisteredOrganization>Temporary VM</RegisteredOrganization>
 
                 <AutoLogon>
 
                   <Enabled>true</Enabled>
+
                   <Username>rdpuser</Username>
 
                   <Password>
+
                     <Value>{encoded_password}</Value>
+
                     <PlainText>false</PlainText>
+
                   </Password>
 
                   <LogonCount>1</LogonCount>
 
                 </AutoLogon>
+
+
+                <RegisteredOwner>RDP User</RegisteredOwner>
+
+                <RegisteredOrganization>Temporary VM</RegisteredOrganization>
 
               </component>
 
@@ -438,21 +512,23 @@ jobs:
           </unattend>
           '''
 
-          with open(
-              os.path.join(os.environ["WORK"], "unattend", "Autounattend.xml"),
-              "w",
-              encoding="utf-8"
-          ) as f:
-              f.write(xml)
-          PY
+          path = os.path.join(
+              os.environ["WORK"],
+              "unattend",
+              "Autounattend.xml"
+          )
 
-          echo "Autounattend.xml created."
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(xml)
+
+          print("Autounattend.xml created.")
+          PY
 
           xmllint \
             --noout \
             "$WORK/unattend/Autounattend.xml"
 
-          echo "XML validation successful."
+          echo "Autounattend.xml XML validation successful."
 
       - name: Create unattended ISO
         run: |
@@ -467,9 +543,11 @@ jobs:
             -o "$WORK/autounattend.iso" \
             "$WORK/unattend"
 
+          echo
+          echo "Unattended ISO created:"
           ls -lh "$WORK/autounattend.iso"
 
-      - name: Create Windows virtual disk
+      - name: Create virtual disk
         run: |
           set -euxo pipefail
 
@@ -480,7 +558,7 @@ jobs:
 
           qemu-img info "$WORK/windows.qcow2"
 
-      - name: Prepare UEFI firmware
+      - name: Prepare UEFI
         run: |
           set -euxo pipefail
 
@@ -488,28 +566,39 @@ jobs:
 
           if [ -f /usr/share/OVMF/OVMF_CODE_4M.ms.fd ]; then
             CODE=/usr/share/OVMF/OVMF_CODE_4M.ms.fd
+
           elif [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then
             CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+
           else
-            echo "ERROR: OVMF firmware not found."
+            echo "ERROR: OVMF code firmware not found."
             exit 1
           fi
+
 
           if [ -f /usr/share/OVMF/OVMF_VARS_4M.ms.fd ]; then
             VARS_TEMPLATE=/usr/share/OVMF/OVMF_VARS_4M.ms.fd
+
           elif [ -f /usr/share/OVMF/OVMF_VARS_4M.fd ]; then
             VARS_TEMPLATE=/usr/share/OVMF/OVMF_VARS_4M.fd
+
           else
-            echo "ERROR: OVMF variables template not found."
+            echo "ERROR: OVMF variables firmware not found."
             exit 1
           fi
 
-          cp "$VARS_TEMPLATE" "$WORK/uefi/OVMF_VARS.fd"
+
+          cp \
+            "$VARS_TEMPLATE" \
+            "$WORK/uefi/OVMF_VARS.fd"
+
 
           echo "OVMF_CODE=$CODE" >> "$GITHUB_ENV"
+
           echo "OVMF_VARS=$WORK/uefi/OVMF_VARS.fd" >> "$GITHUB_ENV"
 
-          echo "Firmware:"
+          echo
+          echo "UEFI firmware:"
           echo "$CODE"
 
       - name: Start virtual TPM
@@ -531,37 +620,45 @@ jobs:
             exit 1
           fi
 
-          echo "TPM started."
+          echo "Virtual TPM started."
 
-      - name: Detect virtualization acceleration
+      - name: Detect KVM
         run: |
           set -euxo pipefail
 
-          if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+          if [ -e /dev/kvm ] && \
+             [ -r /dev/kvm ] && \
+             [ -w /dev/kvm ]; then
+
             echo "KVM=on" >> "$GITHUB_ENV"
+
             echo "KVM is available."
+
           else
+
             echo "KVM=off" >> "$GITHUB_ENV"
-            echo "KVM is unavailable. Using software emulation."
+
+            echo "KVM is NOT available."
+            echo "Using software emulation."
+
           fi
 
-      - name: Boot Windows installer
+      - name: Start Windows VM
         run: |
           set -euxo pipefail
 
-          echo "Starting Windows 11 installation..."
-
-          CPU_ARGS="-cpu max"
+          echo "Starting Windows 11 Pro VM..."
 
           if [ "$KVM" = "on" ]; then
-            ACCEL_ARGS="-enable-kvm"
+            ACCEL="-enable-kvm"
           else
-            ACCEL_ARGS="-accel tcg,thread=multi"
+            ACCEL="-accel tcg,thread=multi"
           fi
 
+
           qemu-system-x86_64 \
-            $ACCEL_ARGS \
-            $CPU_ARGS \
+            $ACCEL \
+            -cpu max \
             -machine q35 \
             -m 8G \
             -smp 4 \
@@ -581,21 +678,34 @@ jobs:
             -monitor unix:"$WORK/qemu-monitor.sock",server=on,wait=off \
             -daemonize
 
+
           sleep 10
 
+
           if ! pgrep -x qemu-system-x86_64 >/dev/null; then
-            echo "ERROR: QEMU stopped immediately."
+
+            echo "ERROR: QEMU stopped."
+
+            echo
+            echo "===== QEMU LOG ====="
+
             cat "$WORK/qemu-serial.log" || true
+
             exit 1
+
           fi
+
 
           echo "QEMU is running."
 
-      - name: Wait for Windows installation and RDP
+      - name: Wait for Windows RDP
         run: |
           set -u
 
-          echo "Waiting for Windows to install and RDP to become available..."
+          echo
+          echo "Waiting for Windows installation..."
+          echo "This can take a long time when KVM is unavailable."
+          echo
 
           MAX_SECONDS=$((60 * 60))
           ELAPSED=0
@@ -603,72 +713,112 @@ jobs:
           while [ "$ELAPSED" -lt "$MAX_SECONDS" ]; do
 
             if ! pgrep -x qemu-system-x86_64 >/dev/null; then
+
               echo
               echo "ERROR: QEMU stopped."
+
               echo
-              echo "===== QEMU SERIAL LOG ====="
+              echo "===== QEMU LOG ====="
+
               cat "$WORK/qemu-serial.log" || true
+
               exit 1
+
             fi
+
 
             if nc -z 127.0.0.1 3389 2>/dev/null; then
+
               echo
               echo "======================================"
-              echo "RDP IS AVAILABLE!"
+              echo "RDP IS AVAILABLE"
               echo "======================================"
-              echo "Local forwarded port: 127.0.0.1:3389"
               echo
-              echo "Windows username: rdpuser"
-              echo "RDP password: the value stored in RDP_PASSWORD"
+              echo "Username: rdpuser"
+              echo "Password: RDP_PASSWORD secret"
+              echo "Port: 3389"
               echo
+
               break
+
             fi
+
 
             if [ $((ELAPSED % 60)) -eq 0 ]; then
-              echo "Still installing... ${ELAPSED}s elapsed."
+
+              echo "Still installing..."
+              echo "Elapsed: ${ELAPSED}s"
+
               df -h /
+
             fi
 
+
             sleep 20
+
             ELAPSED=$((ELAPSED + 20))
+
           done
 
+
           if ! nc -z 127.0.0.1 3389 2>/dev/null; then
+
             echo
-            echo "RDP did not become available within 60 minutes."
+            echo "======================================"
+            echo "RDP DID NOT START"
+            echo "======================================"
+
             echo
-            echo "===== QEMU SERIAL LOG ====="
+            echo "===== QEMU LOG ====="
+
             cat "$WORK/qemu-serial.log" || true
+
             echo
             echo "===== DISK ====="
+
             df -h
+
             exit 1
+
           fi
 
-      - name: Keep Windows VM alive
+      - name: Keep VM alive
         if: success()
         run: |
           set -u
 
           echo
-          echo "Windows VM is running."
-          echo "The GitHub job must remain running for the VM to exist."
+          echo "======================================"
+          echo "WINDOWS VM IS RUNNING"
+          echo "======================================"
+          echo
+          echo "The GitHub job must stay running."
           echo
 
           for i in $(seq 1 150); do
 
             if ! pgrep -x qemu-system-x86_64 >/dev/null; then
+
               echo "QEMU stopped."
+
               exit 1
+
             fi
+
 
             if nc -z 127.0.0.1 3389 2>/dev/null; then
-              echo "[$i/150] RDP is still reachable."
+
+              echo "[$i/150] RDP reachable."
+
             else
-              echo "[$i/150] RDP is not reachable."
+
+              echo "[$i/150] RDP unavailable."
+
             fi
 
+
             sleep 20
+
           done
 
       - name: Cleanup
@@ -679,6 +829,7 @@ jobs:
           echo "Cleaning up..."
 
           pkill -x qemu-system-x86_64 || true
+
           pkill -x swtpm || true
 
           rm -rf "$WORK"
