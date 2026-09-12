@@ -1,17 +1,17 @@
-name: Windows 11 Pro RDP - Tailscale
+name: Windows 11 Browser VM
 
 on:
   workflow_dispatch:
 
 jobs:
-  windows-rdp:
+  windows-browser-vm:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
 
     steps:
 
       # ============================================================
-      # 1. INSTALL EVERYTHING
+      # INSTALL EVERYTHING
       # ============================================================
       - name: Install required packages
         run: |
@@ -30,92 +30,35 @@ jobs:
             p7zip-full \
             curl \
             wget \
-            netcat-openbsd \
-            socat \
-            python3
+            git \
+            python3 \
+            python3-websockify \
+            netcat-openbsd
 
           echo
           echo "=============================================="
-          echo "REQUIRED SOFTWARE INSTALLED"
+          echo "SOFTWARE INSTALLED"
           echo "=============================================="
 
           qemu-system-x86_64 --version
           qemu-img --version
           wimlib-imagex --version
-          swtpm --version
+          websockify --version || true
 
 
       # ============================================================
-      # 2. INSTALL TAILSCALE
-      # ============================================================
-      - name: Install Tailscale
-        run: |
-          set -euxo pipefail
-
-          curl -fsSL https://tailscale.com/install.sh | sh
-
-          echo
-          echo "Tailscale installed."
-
-
-      # ============================================================
-      # 3. CONNECT GITHUB RUNNER TO TAILSCALE
-      # ============================================================
-      - name: Connect runner to Tailscale
-        env:
-          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
-        run: |
-          set -euxo pipefail
-
-          if [ -z "${TS_AUTHKEY:-}" ]; then
-            echo "ERROR: TS_AUTHKEY secret is missing."
-            exit 1
-          fi
-
-          sudo tailscale up \
-            --authkey="$TS_AUTHKEY" \
-            --hostname="github-windows-rdp"
-
-          sleep 5
-
-          TS_IP="$(sudo tailscale ip -4 | head -n 1)"
-
-          if [ -z "$TS_IP" ]; then
-            echo "ERROR: Could not obtain Tailscale IPv4."
-            sudo tailscale status
-            exit 1
-          fi
-
-          echo "$TS_IP" > "$HOME/tailscale-ip.txt"
-
-          echo
-          echo "##################################################"
-          echo "#                                                #"
-          echo "#          TAILSCALE CONNECTION READY            #"
-          echo "#                                                #"
-          echo "##################################################"
-          echo
-          sudo tailscale status
-          echo
-          echo "RUNNER TAILSCALE IP:"
-          echo "$TS_IP"
-          echo
-
-
-      # ============================================================
-      # 4. PREPARE WORKSPACE
+      # PREPARE WORKSPACE
       # ============================================================
       - name: Prepare workspace
         run: |
           set -euxo pipefail
 
-          rm -rf "$HOME/windows-rdp"
+          rm -rf "$HOME/windows-browser"
 
           mkdir -p \
-            "$HOME/windows-rdp" \
-            "$HOME/windows-rdp/iso" \
-            "$HOME/windows-rdp/work" \
-            "$HOME/windows-rdp/autounattend"
+            "$HOME/windows-browser/iso" \
+            "$HOME/windows-browser/work" \
+            "$HOME/windows-browser/autounattend"
 
           echo
           echo "Disk space:"
@@ -123,7 +66,7 @@ jobs:
 
 
       # ============================================================
-      # 5. DOWNLOAD OFFICIAL MICROSOFT ISO
+      # DOWNLOAD WINDOWS
       # ============================================================
       - name: Download official Microsoft Windows ISO
         env:
@@ -147,57 +90,50 @@ jobs:
             --retry 5 \
             --retry-delay 5 \
             --connect-timeout 30 \
-            -o "$HOME/windows-rdp/windows.iso" \
+            -o "$HOME/windows-browser/windows.iso" \
             "$WINDOWS_ISO_URL"
 
-          echo
-          echo "Windows ISO:"
-          ls -lh "$HOME/windows-rdp/windows.iso"
+          ls -lh "$HOME/windows-browser/windows.iso"
 
 
       # ============================================================
-      # 6. EXTRACT ISO
+      # EXTRACT WINDOWS ISO
       # ============================================================
       - name: Extract Windows ISO
         run: |
           set -euxo pipefail
 
-          ISO="$HOME/windows-rdp/windows.iso"
-          EXTRACT="$HOME/windows-rdp/iso"
-
-          echo
-          echo "=============================================="
-          echo "EXTRACTING WINDOWS ISO"
-          echo "=============================================="
-
-          7z x "$ISO" -o"$EXTRACT" -y
+          7z x \
+            "$HOME/windows-browser/windows.iso" \
+            -o"$HOME/windows-browser/iso" \
+            -y
 
           echo
           echo "Windows sources:"
-          ls -lh "$EXTRACT/sources"
+          ls -lh "$HOME/windows-browser/iso/sources"
 
 
       # ============================================================
-      # 7. FIND WINDOWS 11 PRO INDEX
+      # DETECT WINDOWS 11 PRO
       # ============================================================
       - name: Detect Windows 11 Pro index
         run: |
           set -euxo pipefail
 
-          WIM="$HOME/windows-rdp/iso/sources/install.wim"
-          INFO="$HOME/windows-rdp/work/wim-info.txt"
+          WIM="$HOME/windows-browser/iso/sources/install.wim"
+          INFO="$HOME/windows-browser/work/wim-info.txt"
 
           if [ ! -f "$WIM" ]; then
-            echo "ERROR: install.wim was not found."
+            echo "ERROR: install.wim not found."
             exit 1
           fi
 
+          wimlib-imagex info "$WIM" > "$INFO"
+
           echo
           echo "=============================================="
-          echo "READING WINDOWS IMAGE INFORMATION"
+          echo "WINDOWS EDITIONS"
           echo "=============================================="
-
-          wimlib-imagex info "$WIM" > "$INFO"
 
           cat "$INFO"
 
@@ -216,12 +152,13 @@ jobs:
           found = None
 
           for block in blocks:
+
               m = re.search(r'Index:\s*(\d+)', block)
 
               if not m:
                   continue
 
-              index = m.group(1)
+              idx = m.group(1)
 
               nm = re.search(
                   r'(?m)^Name:\s*(.+?)\s*$',
@@ -234,11 +171,11 @@ jobs:
               name = nm.group(1).strip().lower()
 
               if name == "windows 11 pro":
-                  found = index
+                  found = idx
                   break
 
               if name.endswith("windows 11 pro"):
-                  found = index
+                  found = idx
                   break
 
           print(found if found else "NOT_FOUND")
@@ -246,29 +183,19 @@ jobs:
           )"
 
           echo
-          echo "Detected Pro index: $PRO_INDEX"
+          echo "Windows 11 Pro index: $PRO_INDEX"
 
           if [ "$PRO_INDEX" = "NOT_FOUND" ]; then
-            echo
             echo "ERROR: Windows 11 Pro was not found."
             exit 1
           fi
 
-          echo "$PRO_INDEX" > "$HOME/windows-rdp/work/pro-index.txt"
-
-          echo
-          echo "##################################################"
-          echo "#                                                #"
-          echo "#          WINDOWS 11 PRO FOUND                  #"
-          echo "#                                                #"
-          echo "##################################################"
-          echo
-          echo "IMAGE INDEX: $PRO_INDEX"
-          echo
+          echo "$PRO_INDEX" > \
+            "$HOME/windows-browser/work/pro-index.txt"
 
 
       # ============================================================
-      # 8. CREATE UNATTENDED INSTALL FILE
+      # CREATE WINDOWS UNATTENDED INSTALL
       # ============================================================
       - name: Create Autounattend.xml
         env:
@@ -283,15 +210,15 @@ jobs:
 
           case "$RDP_PASSWORD" in
             *'<'*|*'>'*|*'&'*|*'"'*)
-              echo "ERROR: RDP_PASSWORD contains XML-special characters."
+              echo "ERROR: Password contains XML-special characters."
               echo "Use a password without < > & or double quotes."
               exit 1
               ;;
           esac
 
-          PRO_INDEX="$(cat "$HOME/windows-rdp/work/pro-index.txt")"
+          PRO_INDEX="$(cat "$HOME/windows-browser/work/pro-index.txt")"
 
-          cat > "$HOME/windows-rdp/autounattend/Autounattend.xml" <<XML
+          cat > "$HOME/windows-browser/autounattend/Autounattend.xml" <<XML
           <?xml version="1.0" encoding="utf-8"?>
 
           <unattend
@@ -317,7 +244,6 @@ jobs:
                 <UserLocale>en-US</UserLocale>
 
               </component>
-
 
               <component
                 name="Microsoft-Windows-Setup"
@@ -355,7 +281,6 @@ jobs:
 
                     </CreatePartitions>
 
-
                     <ModifyPartitions>
 
                       <ModifyPartition wcm:action="add">
@@ -386,7 +311,6 @@ jobs:
 
                 </DiskConfiguration>
 
-
                 <ImageInstall>
 
                   <OSImage>
@@ -411,7 +335,6 @@ jobs:
 
                 </ImageInstall>
 
-
                 <UserData>
 
                   <AcceptEula>true</AcceptEula>
@@ -430,23 +353,6 @@ jobs:
 
             </settings>
 
-
-            <settings pass="specialize">
-
-              <component
-                name="Microsoft-Windows-Shell-Setup"
-                processorArchitecture="amd64"
-                publicKeyToken="31bf3856ad364e35"
-                language="neutral"
-                versionScope="nonSxS">
-
-                <ComputerName>WIN11-RDP</ComputerName>
-
-              </component>
-
-            </settings>
-
-
             <settings pass="oobeSystem">
 
               <component
@@ -462,7 +368,6 @@ jobs:
                 <UserLocale>en-US</UserLocale>
 
               </component>
-
 
               <component
                 name="Microsoft-Windows-Shell-Setup"
@@ -485,7 +390,6 @@ jobs:
 
                 </OOBE>
 
-
                 <UserAccounts>
 
                   <LocalAccounts>
@@ -494,9 +398,7 @@ jobs:
 
                       <Name>rdpuser</Name>
 
-                      <DisplayName>RDP User</DisplayName>
-
-                      <Description>Remote Desktop User</Description>
+                      <DisplayName>Windows User</DisplayName>
 
                       <Group>Administrators</Group>
 
@@ -513,7 +415,6 @@ jobs:
                   </LocalAccounts>
 
                 </UserAccounts>
-
 
                 <AutoLogon>
 
@@ -533,101 +434,6 @@ jobs:
 
                 </AutoLogon>
 
-
-                <FirstLogonCommands>
-
-                  <SynchronousCommand wcm:action="add">
-
-                    <Order>1</Order>
-
-                    <CommandLine>
-                      powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Set-Service -Name TermService -StartupType Automatic"
-                    </CommandLine>
-
-                    <Description>Set Remote Desktop service automatic</Description>
-
-                  </SynchronousCommand>
-
-
-                  <SynchronousCommand wcm:action="add">
-
-                    <Order>2</Order>
-
-                    <CommandLine>
-                      powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0"
-                    </CommandLine>
-
-                    <Description>Enable Remote Desktop</Description>
-
-                  </SynchronousCommand>
-
-
-                  <SynchronousCommand wcm:action="add">
-
-                    <Order>3</Order>
-
-                    <CommandLine>
-                      powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0"
-                    </CommandLine>
-
-                    <Description>Disable RDP NLA requirement</Description>
-
-                  </SynchronousCommand>
-
-
-                  <SynchronousCommand wcm:action="add">
-
-                    <Order>4</Order>
-
-                    <CommandLine>
-                      powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'"
-                    </CommandLine>
-
-                    <Description>Enable RDP firewall rules</Description>
-
-                  </SynchronousCommand>
-
-
-                  <SynchronousCommand wcm:action="add">
-
-                    <Order>5</Order>
-
-                    <CommandLine>
-                      powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Set-NetFirewallRule -DisplayGroup 'Remote Desktop' -Enabled True -Profile Any"
-                    </CommandLine>
-
-                    <Description>Allow RDP on every firewall profile</Description>
-
-                  </SynchronousCommand>
-
-
-                  <SynchronousCommand wcm:action="add">
-
-                    <Order>6</Order>
-
-                    <CommandLine>
-                      powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'rdpuser' -ErrorAction SilentlyContinue"
-                    </CommandLine>
-
-                    <Description>Add RDP user</Description>
-
-                  </SynchronousCommand>
-
-
-                  <SynchronousCommand wcm:action="add">
-
-                    <Order>7</Order>
-
-                    <CommandLine>
-                      powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Service -Name TermService"
-                    </CommandLine>
-
-                    <Description>Start Remote Desktop service</Description>
-
-                  </SynchronousCommand>
-
-                </FirstLogonCommands>
-
               </component>
 
             </settings>
@@ -635,14 +441,13 @@ jobs:
           </unattend>
           XML
 
-          echo
           echo "Autounattend.xml created."
 
 
       # ============================================================
-      # 9. INSERT PASSWORD SAFELY
+      # INSERT PASSWORD
       # ============================================================
-      - name: Insert RDP password
+      - name: Insert password
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
@@ -652,7 +457,7 @@ jobs:
           import os
           from pathlib import Path
 
-          path = Path.home() / "windows-rdp/autounattend/Autounattend.xml"
+          path = Path.home() / "windows-browser/autounattend/Autounattend.xml"
 
           text = path.read_text()
 
@@ -665,31 +470,29 @@ jobs:
 
           path.write_text(text)
 
-          print("RDP password inserted successfully.")
+          print("Password inserted.")
           PY
 
 
       # ============================================================
-      # 10. CREATE ANSWER ISO
+      # CREATE ANSWER ISO
       # ============================================================
       - name: Create unattended ISO
         run: |
           set -euxo pipefail
 
-          cd "$HOME/windows-rdp/autounattend"
-
           xorriso \
             -as mkisofs \
             -iso-level 3 \
             -V AUTOUNATTEND \
-            -o "$HOME/windows-rdp/work/autounattend.iso" \
-            Autounattend.xml
+            -o "$HOME/windows-browser/work/autounattend.iso" \
+            "$HOME/windows-browser/autounattend/Autounattend.xml"
 
-          ls -lh "$HOME/windows-rdp/work/autounattend.iso"
+          ls -lh "$HOME/windows-browser/work/autounattend.iso"
 
 
       # ============================================================
-      # 11. CREATE VIRTUAL DISK
+      # CREATE WINDOWS DISK
       # ============================================================
       - name: Create Windows virtual disk
         run: |
@@ -697,21 +500,21 @@ jobs:
 
           qemu-img create \
             -f qcow2 \
-            "$HOME/windows-rdp/work/windows.qcow2" \
+            "$HOME/windows-browser/work/windows.qcow2" \
             64G
 
           qemu-img info \
-            "$HOME/windows-rdp/work/windows.qcow2"
+            "$HOME/windows-browser/work/windows.qcow2"
 
 
       # ============================================================
-      # 12. START TPM
+      # START TPM
       # ============================================================
-      - name: Start TPM 2.0
+      - name: Start TPM
         run: |
           set -euxo pipefail
 
-          WORK="$HOME/windows-rdp/work"
+          WORK="$HOME/windows-browser/work"
 
           mkdir -p "$WORK/tpm"
 
@@ -723,22 +526,19 @@ jobs:
 
           sleep 2
 
-          if [ ! -S "$WORK/swtpm.sock" ]; then
-            echo "ERROR: TPM socket was not created."
-            exit 1
-          fi
+          test -S "$WORK/swtpm.sock"
 
-          echo "TPM 2.0 is running."
+          echo "TPM 2.0 ready."
 
 
       # ============================================================
-      # 13. START WINDOWS VM
+      # START WINDOWS WITH VNC
       # ============================================================
-      - name: Start Windows 11 VM
+      - name: Start Windows VM with VNC
         run: |
           set -euxo pipefail
 
-          WORK="$HOME/windows-rdp/work"
+          WORK="$HOME/windows-browser/work"
 
           OVMF_CODE="/usr/share/OVMF/OVMF_CODE_4M.fd"
           OVMF_VARS="/usr/share/OVMF/OVMF_VARS_4M.fd"
@@ -751,10 +551,8 @@ jobs:
             OVMF_VARS="/usr/share/OVMF/OVMF_VARS.fd"
           fi
 
-          if [ ! -f "$OVMF_CODE" ] || [ ! -f "$OVMF_VARS" ]; then
-            echo "ERROR: OVMF firmware not found."
-            exit 1
-          fi
+          test -f "$OVMF_CODE"
+          test -f "$OVMF_VARS"
 
           cp "$OVMF_VARS" "$WORK/OVMF_VARS.fd"
 
@@ -778,11 +576,11 @@ jobs:
             -tpmdev emulator,id=tpm0,chardev=chrtpm \
             -device tpm-tis,tpmdev=tpm0 \
             -drive file="$WORK/windows.qcow2",format=qcow2,if=ide \
-            -drive file="$HOME/windows-rdp/windows.iso",media=cdrom,readonly=on \
+            -drive file="$HOME/windows-browser/windows.iso",media=cdrom,readonly=on \
             -drive file="$WORK/autounattend.iso",media=cdrom,readonly=on \
-            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:3390-:3389 \
+            -netdev user,id=net0 \
             -device e1000,netdev=net0 \
-            -boot once=d \
+            -vnc 127.0.0.1:0 \
             -display none \
             -serial file:"$WORK/qemu-serial.log" \
             -monitor unix:"$WORK/qemu-monitor.sock",server=on,wait=off \
@@ -791,231 +589,60 @@ jobs:
 
           sleep 5
 
-          if [ ! -f "$WORK/qemu.pid" ]; then
-            echo "ERROR: QEMU did not start."
-            cat "$WORK/qemu-serial.log" || true
-            exit 1
-          fi
-
           QEMU_PID="$(cat "$WORK/qemu.pid")"
 
           if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-            echo "ERROR: QEMU stopped immediately."
+            echo "ERROR: QEMU stopped."
+
             cat "$WORK/qemu-serial.log" || true
+
             exit 1
           fi
 
           echo
-          echo "##################################################"
-          echo "#                                                #"
-          echo "#        WINDOWS VM PROCESS IS RUNNING            #"
-          echo "#                                                #"
-          echo "##################################################"
-          echo
+          echo "WINDOWS VM STARTED"
           echo "QEMU PID: $QEMU_PID"
-          echo
-          echo "Windows installation is now running."
-          echo "This can take several minutes because TCG/software"
-          echo "emulation is being used."
+          echo "VNC: 127.0.0.1:5900"
           echo
 
 
       # ============================================================
-      # 14. CREATE TAILSCALE -> QEMU RDP FORWARDER
+      # WAIT FOR VNC
       # ============================================================
-      - name: Create Tailscale RDP forwarder
+      - name: Wait for VNC
         run: |
           set -euxo pipefail
-
-          TS_IP="$(cat "$HOME/tailscale-ip.txt")"
-
-          WORK="$HOME/windows-rdp/work"
 
           echo
           echo "=============================================="
-          echo "STARTING RDP FORWARDER"
+          echo "WAITING FOR QEMU VNC"
           echo "=============================================="
-          echo
-          echo "Tailscale endpoint : $TS_IP:3389"
-          echo "QEMU endpoint      : 127.0.0.1:3390"
-          echo
-
-          nohup socat \
-            "TCP-LISTEN:3389,bind=$TS_IP,reuseaddr,fork" \
-            "TCP:127.0.0.1:3390" \
-            > "$WORK/socat.log" 2>&1 &
-
-          SOCAT_PID=$!
-
-          echo "$SOCAT_PID" > "$WORK/socat.pid"
-
-          sleep 2
-
-          if ! kill -0 "$SOCAT_PID" 2>/dev/null; then
-            echo "ERROR: RDP forwarder failed."
-            cat "$WORK/socat.log" || true
-            exit 1
-          fi
-
-          echo "RDP forwarder running."
-          echo "SOCAT PID: $SOCAT_PID"
-
-
-      # ============================================================
-      # 15. PRINT THAT THE VM IS ALIVE
-      # ============================================================
-      - name: VM is alive
-        run: |
-          set -euxo pipefail
-
-          TS_IP="$(cat "$HOME/tailscale-ip.txt")"
-
-          echo
-          echo
-          echo "############################################################"
-          echo "#                                                          #"
-          echo "#                 WINDOWS VM IS ALIVE                      #"
-          echo "#                                                          #"
-          echo "############################################################"
-          echo
-          echo "The real Windows 11 VM has started."
-          echo
-          echo "Tailscale IP:"
-          echo "$TS_IP"
-          echo
-          echo "RDP endpoint:"
-          echo "$TS_IP:3389"
-          echo
-          echo "Windows username:"
-          echo "rdpuser"
-          echo
-          echo "Windows password:"
-          echo "Use the password stored in RDP_PASSWORD."
-          echo
-          echo "RDP may not be ready yet."
-          echo "Windows is still installing/booting."
-          echo
-          echo "############################################################"
-          echo
-
-
-      # ============================================================
-      # 16. WAIT A LONG TIME FOR WINDOWS RDP
-      # ============================================================
-      - name: Wait for Windows RDP
-        run: |
-          set -euxo pipefail
-
-          TS_IP="$(cat "$HOME/tailscale-ip.txt")"
-
-          WORK="$HOME/windows-rdp/work"
-
-          echo
-          echo "##################################################"
-          echo "#                                                #"
-          echo "#       WAITING FOR WINDOWS RDP                  #"
-          echo "#                                                #"
-          echo "##################################################"
-          echo
 
           READY=0
 
-          # 40 minutes maximum waiting time.
-          # TCG emulation can be extremely slow.
+          for i in $(seq 1 120); do
 
-          for i in $(seq 1 480); do
-
-            if [ ! -f "$WORK/qemu.pid" ]; then
-              echo "ERROR: QEMU PID file disappeared."
-              exit 1
-            fi
-
-            QEMU_PID="$(cat "$WORK/qemu.pid")"
-
-            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+            if nc -z 127.0.0.1 5900 2>/dev/null; then
 
               echo
-              echo "ERROR: Windows VM stopped."
-              echo
-
-              echo "================ QEMU LOG ================"
-              cat "$WORK/qemu-serial.log" || true
-
-              echo
-              echo "================ SOCAT LOG ================"
-              cat "$WORK/socat.log" || true
-
-              exit 1
-            fi
-
-
-            if nc -z 127.0.0.1 3390 2>/dev/null; then
-
-              echo "QEMU RDP forwarding port is OPEN."
-
-              if nc -z "$TS_IP" 3389 2>/dev/null; then
-
-                echo
-                echo "Tailscale RDP endpoint is OPEN."
-
-                READY=1
-
-                break
-
-              fi
+              echo "VNC IS READY."
+              READY=1
+              break
 
             fi
 
+            echo "Waiting for VNC... $i/120"
 
-            if [ $((i % 12)) -eq 0 ]; then
-
-              MINUTES=$((i / 12))
-
-              echo
-              echo "Still waiting for Windows..."
-              echo "Elapsed: approximately ${MINUTES} minutes"
-              echo "VM PID: $QEMU_PID"
-              echo "RDP: $TS_IP:3389"
-              echo
-
-            else
-
-              echo "Waiting for Windows RDP... $i/480"
-
-            fi
-
-            sleep 5
+            sleep 2
 
           done
-
 
           if [ "$READY" -ne 1 ]; then
 
             echo
-            echo "##################################################"
-            echo "#                                                #"
-            echo "#       RDP DID NOT BECOME READY                 #"
-            echo "#                                                #"
-            echo "##################################################"
-            echo
+            echo "ERROR: VNC did not start."
 
-            echo "Windows VM is still being investigated."
-            echo
-
-            echo "================ QEMU LOG ================"
-            tail -200 "$WORK/qemu-serial.log" || true
-
-            echo
-            echo "================ SOCAT LOG ================"
-            tail -100 "$WORK/socat.log" || true
-
-            echo
-            echo "QEMU process:"
-            ps aux | grep qemu-system-x86_64 | grep -v grep || true
-
-            echo
-            echo "Listening ports:"
-            ss -lntp || true
+            cat "$HOME/windows-browser/work/qemu-serial.log" || true
 
             exit 1
 
@@ -1023,132 +650,227 @@ jobs:
 
 
       # ============================================================
-      # 17. FINAL RDP INFORMATION
+      # DOWNLOAD NOVNC
       # ============================================================
-      - name: WINDOWS RDP READY
+      - name: Install noVNC
         run: |
           set -euxo pipefail
 
-          TS_IP="$(cat "$HOME/tailscale-ip.txt")"
+          cd "$HOME/windows-browser/work"
+
+          git clone \
+            --depth 1 \
+            https://github.com/novnc/noVNC.git \
+            novnc
 
           echo
-          echo
-          echo
-          echo "################################################################"
-          echo "#                                                              #"
-          echo "#              WINDOWS 11 PRO RDP IS READY                    #"
-          echo "#                                                              #"
-          echo "################################################################"
-          echo
-          echo "REAL WINDOWS VM:"
-          echo "YES"
-          echo
-          echo "RDP ADDRESS:"
-          echo
-          echo "$TS_IP:3389"
-          echo
-          echo "USERNAME:"
-          echo
-          echo "rdpuser"
-          echo
-          echo "PASSWORD:"
-          echo
-          echo "Your RDP_PASSWORD secret"
-          echo
-          echo "################################################################"
-          echo
-          echo "On Android:"
-          echo
-          echo "1. Open Tailscale."
-          echo "2. Make sure the device is connected."
-          echo "3. Open your Microsoft Remote Desktop/RDP client."
-          echo "4. Add:"
-          echo
-          echo "   $TS_IP:3389"
-          echo
-          echo "5. Username:"
-          echo "   rdpuser"
-          echo
-          echo "6. Enter your RDP_PASSWORD."
-          echo
-          echo "################################################################"
-          echo
+          echo "noVNC installed."
+
+          ls "$HOME/windows-browser/work/novnc"
 
 
       # ============================================================
-      # 18. KEEP EVERYTHING ALIVE
+      # START NOVNC
       # ============================================================
-      - name: KEEP WINDOWS VM RUNNING
+      - name: Start noVNC
         run: |
           set -euxo pipefail
 
-          WORK="$HOME/windows-rdp/work"
+          WORK="$HOME/windows-browser/work"
 
-          TS_IP="$(cat "$HOME/tailscale-ip.txt")"
+          cd "$WORK/novnc"
+
+          nohup ./utils/novnc_proxy \
+            --vnc 127.0.0.1:5900 \
+            --listen 127.0.0.1:6080 \
+            > "$WORK/novnc.log" 2>&1 &
+
+          NOVNC_PID=$!
+
+          echo "$NOVNC_PID" > "$WORK/novnc.pid"
+
+          sleep 5
+
+          if ! kill -0 "$NOVNC_PID" 2>/dev/null; then
+
+            echo "ERROR: noVNC failed."
+
+            cat "$WORK/novnc.log" || true
+
+            exit 1
+
+          fi
+
+          echo
+          echo "noVNC IS RUNNING"
+          echo "Local address: http://127.0.0.1:6080"
+          echo
+
+
+      # ============================================================
+      # INSTALL CLOUDFLARED
+      # ============================================================
+      - name: Install Cloudflare tunnel
+        run: |
+          set -euxo pipefail
+
+          wget \
+            -q \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
+            -O "$HOME/cloudflared.deb"
+
+          sudo dpkg -i "$HOME/cloudflared.deb"
+
+          cloudflared --version
+
+
+      # ============================================================
+      # START PUBLIC BROWSER TUNNEL
+      # ============================================================
+      - name: Create public browser URL
+        run: |
+          set -euxo pipefail
+
+          WORK="$HOME/windows-browser/work"
+
+          echo
+          echo "##################################################"
+          echo "#                                                #"
+          echo "#        CREATING PUBLIC BROWSER LINK            #"
+          echo "#                                                #"
+          echo "##################################################"
+          echo
+
+          nohup cloudflared tunnel \
+            --no-autoupdate \
+            --url http://127.0.0.1:6080 \
+            > "$WORK/cloudflared.log" 2>&1 &
+
+          CLOUDFLARED_PID=$!
+
+          echo "$CLOUDFLARED_PID" > "$WORK/cloudflared.pid"
+
+          URL=""
+
+          for i in $(seq 1 60); do
+
+            URL="$(
+              grep -Eo \
+              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+              "$WORK/cloudflared.log" \
+              | head -n 1 \
+              || true
+            )"
+
+            if [ -n "$URL" ]; then
+              break
+            fi
+
+            echo "Waiting for Cloudflare URL... $i/60"
+
+            sleep 2
+
+          done
+
+          if [ -z "$URL" ]; then
+
+            echo
+            echo "ERROR: Cloudflare public URL was not created."
+            echo
+
+            cat "$WORK/cloudflared.log" || true
+
+            exit 1
+
+          fi
+
+          echo "$URL" > "$WORK/browser-url.txt"
 
           echo
           echo
           echo "################################################################"
           echo "#                                                              #"
-          echo "#                WINDOWS 11 VM IS RUNNING                     #"
+          echo "#              WINDOWS 11 BROWSER VM IS READY                  #"
           echo "#                                                              #"
           echo "################################################################"
           echo
-          echo "RDP ADDRESS:"
-          echo "$TS_IP:3389"
+          echo "OPEN THIS URL ON YOUR ANDROID PHONE:"
           echo
-          echo "USERNAME:"
-          echo "rdpuser"
+          echo "$URL/vnc.html?autoconnect=true&resize=remote"
           echo
-          echo "The GitHub Actions job will stay alive."
+          echo "################################################################"
+          echo
+          echo "REAL WINDOWS:"
+          echo "Windows 11 Pro"
+          echo
+          echo "ACCESS:"
+          echo "Chrome / Android browser"
+          echo
+          echo "NO RDP"
+          echo "NO TAILSCALE"
+          echo
+          echo "################################################################"
+          echo
+
+
+      # ============================================================
+      # KEEP EVERYTHING ALIVE
+      # ============================================================
+      - name: Keep Windows browser VM alive
+        run: |
+          set -euxo pipefail
+
+          WORK="$HOME/windows-browser/work"
+
+          URL="$(cat "$WORK/browser-url.txt")"
+
+          echo
+          echo
+          echo "################################################################"
+          echo "#                                                              #"
+          echo "#                WINDOWS VM IS RUNNING                        #"
+          echo "#                                                              #"
+          echo "################################################################"
+          echo
+          echo "BROWSER URL:"
+          echo
+          echo "$URL/vnc.html?autoconnect=true&resize=remote"
+          echo
+          echo "Open that URL on your phone."
           echo
           echo "################################################################"
           echo
 
           while true; do
 
-            if [ ! -f "$WORK/qemu.pid" ]; then
-              echo "ERROR: QEMU PID file disappeared."
-              exit 1
-            fi
-
             QEMU_PID="$(cat "$WORK/qemu.pid")"
 
             if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-
-              echo
-              echo "ERROR: Windows VM stopped."
-              echo
-              tail -200 "$WORK/qemu-serial.log" || true
-
+              echo "Windows VM stopped."
+              cat "$WORK/qemu-serial.log" || true
               exit 1
             fi
 
+            NOVNC_PID="$(cat "$WORK/novnc.pid")"
 
-            if [ ! -f "$WORK/socat.pid" ]; then
-              echo "ERROR: RDP forwarder PID file disappeared."
+            if ! kill -0 "$NOVNC_PID" 2>/dev/null; then
+              echo "noVNC stopped."
+              cat "$WORK/novnc.log" || true
               exit 1
             fi
 
-            SOCAT_PID="$(cat "$WORK/socat.pid")"
+            CLOUDFLARED_PID="$(cat "$WORK/cloudflared.pid")"
 
-            if ! kill -0 "$SOCAT_PID" 2>/dev/null; then
-
-              echo
-              echo "ERROR: RDP forwarder stopped."
-              echo
-              cat "$WORK/socat.log" || true
-
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              echo "Cloudflare tunnel stopped."
+              cat "$WORK/cloudflared.log" || true
               exit 1
             fi
-
 
             echo
             echo "============================================================"
             echo "WINDOWS VM : RUNNING"
-            echo "RDP        : $TS_IP:3389"
-            echo "QEMU PID   : $QEMU_PID"
-            echo "SOCAT PID  : $SOCAT_PID"
+            echo "BROWSER    : $URL/vnc.html?autoconnect=true&resize=remote"
             echo "============================================================"
 
             sleep 60
