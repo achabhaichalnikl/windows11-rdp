@@ -11,7 +11,7 @@ jobs:
     steps:
 
       # ============================================================
-      # INSTALL EVERYTHING
+      # INSTALL PACKAGES
       # ============================================================
       - name: Install required packages
         run: |
@@ -35,19 +35,15 @@ jobs:
             python3-websockify \
             netcat-openbsd
 
-          echo
-          echo "=============================================="
-          echo "SOFTWARE INSTALLED"
-          echo "=============================================="
+          echo "Packages installed."
 
           qemu-system-x86_64 --version
           qemu-img --version
           wimlib-imagex --version
-          websockify --version || true
 
 
       # ============================================================
-      # PREPARE WORKSPACE
+      # PREPARE
       # ============================================================
       - name: Prepare workspace
         run: |
@@ -60,15 +56,13 @@ jobs:
             "$HOME/windows-browser/work" \
             "$HOME/windows-browser/autounattend"
 
-          echo
-          echo "Disk space:"
           df -h "$HOME"
 
 
       # ============================================================
-      # DOWNLOAD WINDOWS
+      # DOWNLOAD OFFICIAL MICROSOFT ISO
       # ============================================================
-      - name: Download official Microsoft Windows ISO
+      - name: Download Windows ISO
         env:
           WINDOWS_ISO_URL: ${{ secrets.WINDOWS_ISO_URL }}
         run: |
@@ -78,11 +72,6 @@ jobs:
             echo "ERROR: WINDOWS_ISO_URL secret is missing."
             exit 1
           fi
-
-          echo
-          echo "=============================================="
-          echo "DOWNLOADING WINDOWS 11"
-          echo "=============================================="
 
           curl \
             -L \
@@ -97,7 +86,7 @@ jobs:
 
 
       # ============================================================
-      # EXTRACT WINDOWS ISO
+      # EXTRACT ISO
       # ============================================================
       - name: Extract Windows ISO
         run: |
@@ -108,32 +97,22 @@ jobs:
             -o"$HOME/windows-browser/iso" \
             -y
 
-          echo
-          echo "Windows sources:"
-          ls -lh "$HOME/windows-browser/iso/sources"
+          test -f "$HOME/windows-browser/iso/sources/install.wim"
+
+          ls -lh "$HOME/windows-browser/iso/sources/install.wim"
 
 
       # ============================================================
       # DETECT WINDOWS 11 PRO
       # ============================================================
-      - name: Detect Windows 11 Pro index
+      - name: Detect Windows 11 Pro
         run: |
           set -euxo pipefail
 
           WIM="$HOME/windows-browser/iso/sources/install.wim"
           INFO="$HOME/windows-browser/work/wim-info.txt"
 
-          if [ ! -f "$WIM" ]; then
-            echo "ERROR: install.wim not found."
-            exit 1
-          fi
-
           wimlib-imagex info "$WIM" > "$INFO"
-
-          echo
-          echo "=============================================="
-          echo "WINDOWS EDITIONS"
-          echo "=============================================="
 
           cat "$INFO"
 
@@ -152,7 +131,6 @@ jobs:
           found = None
 
           for block in blocks:
-
               m = re.search(r'Index:\s*(\d+)', block)
 
               if not m:
@@ -182,7 +160,6 @@ jobs:
           PY
           )"
 
-          echo
           echo "Windows 11 Pro index: $PRO_INDEX"
 
           if [ "$PRO_INDEX" = "NOT_FOUND" ]; then
@@ -195,7 +172,7 @@ jobs:
 
 
       # ============================================================
-      # CREATE WINDOWS UNATTENDED INSTALL
+      # CREATE UNATTENDED ANSWER FILE
       # ============================================================
       - name: Create Autounattend.xml
         env:
@@ -403,11 +380,8 @@ jobs:
                       <Group>Administrators</Group>
 
                       <Password>
-
-                        <Value>\${RDP_PASSWORD}</Value>
-
+                        <Value>${RDP_PASSWORD}</Value>
                         <PlainText>true</PlainText>
-
                       </Password>
 
                     </LocalAccount>
@@ -419,17 +393,12 @@ jobs:
                 <AutoLogon>
 
                   <Enabled>true</Enabled>
-
                   <Username>rdpuser</Username>
-
                   <LogonCount>10</LogonCount>
 
                   <Password>
-
-                    <Value>\${RDP_PASSWORD}</Value>
-
+                    <Value>${RDP_PASSWORD}</Value>
                     <PlainText>true</PlainText>
-
                   </Password>
 
                 </AutoLogon>
@@ -443,35 +412,8 @@ jobs:
 
           echo "Autounattend.xml created."
 
-
-      # ============================================================
-      # INSERT PASSWORD
-      # ============================================================
-      - name: Insert password
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-        run: |
-          set -euxo pipefail
-
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          path = Path.home() / "windows-browser/autounattend/Autounattend.xml"
-
-          text = path.read_text()
-
-          password = os.environ["RDP_PASSWORD"]
-
-          text = text.replace(
-              r"\${RDP_PASSWORD}",
-              password
-          )
-
-          path.write_text(text)
-
-          print("Password inserted.")
-          PY
+          grep -q "Windows User" \
+            "$HOME/windows-browser/autounattend/Autounattend.xml"
 
 
       # ============================================================
@@ -486,15 +428,15 @@ jobs:
             -iso-level 3 \
             -V AUTOUNATTEND \
             -o "$HOME/windows-browser/work/autounattend.iso" \
-            "$HOME/windows-browser/autounattend/Autounattend.xml"
+            "$HOME/windows-browser/autounattend"
 
           ls -lh "$HOME/windows-browser/work/autounattend.iso"
 
 
       # ============================================================
-      # CREATE WINDOWS DISK
+      # CREATE DISK
       # ============================================================
-      - name: Create Windows virtual disk
+      - name: Create Windows disk
         run: |
           set -euxo pipefail
 
@@ -532,9 +474,14 @@ jobs:
 
 
       # ============================================================
-      # START WINDOWS WITH VNC
+      # START WINDOWS
+      #
+      # IMPORTANT:
+      # QEMU automatically boots the Windows CD.
+      # We also automatically send ENTER to the Windows CD boot
+      # prompt instead of requiring the user to touch noVNC.
       # ============================================================
-      - name: Start Windows VM with VNC
+      - name: Start Windows VM
         run: |
           set -euxo pipefail
 
@@ -556,14 +503,6 @@ jobs:
 
           cp "$OVMF_VARS" "$WORK/OVMF_VARS.fd"
 
-          echo
-          echo "##################################################"
-          echo "#                                                #"
-          echo "#          STARTING WINDOWS 11 PRO               #"
-          echo "#                                                #"
-          echo "##################################################"
-          echo
-
           qemu-system-x86_64 \
             -accel tcg,thread=multi \
             -machine q35 \
@@ -578,6 +517,7 @@ jobs:
             -drive file="$WORK/windows.qcow2",format=qcow2,if=ide \
             -drive file="$HOME/windows-browser/windows.iso",media=cdrom,readonly=on \
             -drive file="$WORK/autounattend.iso",media=cdrom,readonly=on \
+            -boot order=d \
             -netdev user,id=net0 \
             -device e1000,netdev=net0 \
             -vnc 127.0.0.1:0 \
@@ -599,10 +539,52 @@ jobs:
             exit 1
           fi
 
-          echo
-          echo "WINDOWS VM STARTED"
+          echo "Windows VM started."
           echo "QEMU PID: $QEMU_PID"
-          echo "VNC: 127.0.0.1:5900"
+
+
+      # ============================================================
+      # AUTOMATICALLY ANSWER:
+      # "PRESS ANY KEY TO BOOT FROM CD OR DVD"
+      #
+      # We wait for the VM to reach the CD boot stage, then send
+      # ENTER through QEMU's monitor.
+      # ============================================================
+      - name: Automatically boot Windows installer
+        run: |
+          set -euxo pipefail
+
+          WORK="$HOME/windows-browser/work"
+
+          echo
+          echo "Waiting for Windows CD boot prompt..."
+          echo
+
+          sleep 8
+
+          for i in $(seq 1 12); do
+
+            if [ -S "$WORK/qemu-monitor.sock" ]; then
+
+              echo "Sending ENTER to Windows installer..."
+
+              printf 'sendkey ret\n' | \
+                socat - UNIX-CONNECT:"$WORK/qemu-monitor.sock" \
+                || true
+
+              sleep 5
+
+              echo "Boot command sent."
+
+              break
+            fi
+
+            sleep 2
+
+          done
+
+          echo
+          echo "Windows installation should now be starting."
           echo
 
 
@@ -613,10 +595,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          echo
-          echo "=============================================="
-          echo "WAITING FOR QEMU VNC"
-          echo "=============================================="
+          echo "Waiting for VNC..."
 
           READY=0
 
@@ -624,8 +603,7 @@ jobs:
 
             if nc -z 127.0.0.1 5900 2>/dev/null; then
 
-              echo
-              echo "VNC IS READY."
+              echo "VNC is ready."
               READY=1
               break
 
@@ -639,7 +617,6 @@ jobs:
 
           if [ "$READY" -ne 1 ]; then
 
-            echo
             echo "ERROR: VNC did not start."
 
             cat "$HOME/windows-browser/work/qemu-serial.log" || true
@@ -650,7 +627,7 @@ jobs:
 
 
       # ============================================================
-      # DOWNLOAD NOVNC
+      # INSTALL NOVNC
       # ============================================================
       - name: Install noVNC
         run: |
@@ -663,10 +640,7 @@ jobs:
             https://github.com/novnc/noVNC.git \
             novnc
 
-          echo
           echo "noVNC installed."
-
-          ls "$HOME/windows-browser/work/novnc"
 
 
       # ============================================================
@@ -701,10 +675,7 @@ jobs:
 
           fi
 
-          echo
-          echo "noVNC IS RUNNING"
-          echo "Local address: http://127.0.0.1:6080"
-          echo
+          echo "noVNC is running."
 
 
       # ============================================================
@@ -725,21 +696,13 @@ jobs:
 
 
       # ============================================================
-      # START PUBLIC BROWSER TUNNEL
+      # CREATE PUBLIC BROWSER LINK
       # ============================================================
       - name: Create public browser URL
         run: |
           set -euxo pipefail
 
           WORK="$HOME/windows-browser/work"
-
-          echo
-          echo "##################################################"
-          echo "#                                                #"
-          echo "#        CREATING PUBLIC BROWSER LINK            #"
-          echo "#                                                #"
-          echo "##################################################"
-          echo
 
           nohup cloudflared tunnel \
             --no-autoupdate \
@@ -756,17 +719,17 @@ jobs:
 
             URL="$(
               grep -Eo \
-              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
-              "$WORK/cloudflared.log" \
-              | head -n 1 \
-              || true
+                'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+                "$WORK/cloudflared.log" \
+                | head -n 1 \
+                || true
             )"
 
             if [ -n "$URL" ]; then
               break
             fi
 
-            echo "Waiting for Cloudflare URL... $i/60"
+            echo "Waiting for public URL... $i/60"
 
             sleep 2
 
@@ -774,9 +737,7 @@ jobs:
 
           if [ -z "$URL" ]; then
 
-            echo
-            echo "ERROR: Cloudflare public URL was not created."
-            echo
+            echo "ERROR: Cloudflare URL was not created."
 
             cat "$WORK/cloudflared.log" || true
 
@@ -788,35 +749,28 @@ jobs:
 
           echo
           echo
-          echo "################################################################"
-          echo "#                                                              #"
-          echo "#              WINDOWS 11 BROWSER VM IS READY                  #"
-          echo "#                                                              #"
-          echo "################################################################"
+          echo "=============================================================="
+          echo "       WINDOWS 11 PRO BROWSER VM IS READY"
+          echo "=============================================================="
           echo
-          echo "OPEN THIS URL ON YOUR ANDROID PHONE:"
+          echo "OPEN THIS ON YOUR ANDROID PHONE:"
           echo
           echo "$URL/vnc.html?autoconnect=true&resize=remote"
           echo
-          echo "################################################################"
+          echo "=============================================================="
           echo
-          echo "REAL WINDOWS:"
-          echo "Windows 11 Pro"
+          echo "Windows: Windows 11 Pro"
+          echo "Access : Browser / noVNC"
+          echo "RDP    : NOT REQUIRED"
+          echo "Tailscale: NOT REQUIRED"
           echo
-          echo "ACCESS:"
-          echo "Chrome / Android browser"
-          echo
-          echo "NO RDP"
-          echo "NO TAILSCALE"
-          echo
-          echo "################################################################"
-          echo
+          echo "=============================================================="
 
 
       # ============================================================
       # KEEP EVERYTHING ALIVE
       # ============================================================
-      - name: Keep Windows browser VM alive
+      - name: Keep VM alive
         run: |
           set -euxo pipefail
 
@@ -825,53 +779,54 @@ jobs:
           URL="$(cat "$WORK/browser-url.txt")"
 
           echo
+          echo "=============================================================="
+          echo "WINDOWS VM RUNNING"
           echo
-          echo "################################################################"
-          echo "#                                                              #"
-          echo "#                WINDOWS VM IS RUNNING                        #"
-          echo "#                                                              #"
-          echo "################################################################"
-          echo
-          echo "BROWSER URL:"
-          echo
+          echo "BROWSER:"
           echo "$URL/vnc.html?autoconnect=true&resize=remote"
-          echo
-          echo "Open that URL on your phone."
-          echo
-          echo "################################################################"
-          echo
+          echo "=============================================================="
 
           while true; do
 
             QEMU_PID="$(cat "$WORK/qemu.pid")"
 
             if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+
               echo "Windows VM stopped."
+
               cat "$WORK/qemu-serial.log" || true
+
               exit 1
+
             fi
 
             NOVNC_PID="$(cat "$WORK/novnc.pid")"
 
             if ! kill -0 "$NOVNC_PID" 2>/dev/null; then
+
               echo "noVNC stopped."
+
               cat "$WORK/novnc.log" || true
+
               exit 1
+
             fi
 
             CLOUDFLARED_PID="$(cat "$WORK/cloudflared.pid")"
 
             if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+
               echo "Cloudflare tunnel stopped."
+
               cat "$WORK/cloudflared.log" || true
+
               exit 1
+
             fi
 
             echo
-            echo "============================================================"
-            echo "WINDOWS VM : RUNNING"
-            echo "BROWSER    : $URL/vnc.html?autoconnect=true&resize=remote"
-            echo "============================================================"
+            echo "VM: RUNNING"
+            echo "URL: $URL/vnc.html?autoconnect=true&resize=remote"
 
             sleep 60
 
