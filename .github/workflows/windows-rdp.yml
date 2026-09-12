@@ -1,4 +1,4 @@
-name: Windows 11 RDP - TCG + Tailscale
+name: Win 11 RDP + Tailscale
 
 on:
   workflow_dispatch:
@@ -30,6 +30,60 @@ jobs:
             netcat-openbsd \
             libxml2-utils
 
+      - name: Install Tailscale
+        run: |
+          set -euxo pipefail
+
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+          tailscale version
+
+      - name: Connect to Tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          set -euxo pipefail
+
+          if [ -z "${TS_AUTHKEY:-}" ]; then
+            echo "ERROR: TS_AUTHKEY secret is missing."
+            exit 1
+          fi
+
+          sudo tailscale up \
+            --authkey="$TS_AUTHKEY" \
+            --hostname="github-windows-rdp"
+
+          sleep 5
+
+          echo
+          echo "======================================"
+          echo "TAILSCALE CONNECTED"
+          echo "======================================"
+
+          sudo tailscale status
+
+          TS_IP="$(sudo tailscale ip -4 | head -n 1)"
+
+          if [ -z "$TS_IP" ]; then
+            echo "ERROR: Tailscale IP was not obtained."
+            exit 1
+          fi
+
+          echo "$TS_IP" > "$HOME/tailscale-ip.txt"
+
+          echo
+          echo "======================================"
+          echo "YOUR RDP IP"
+          echo "======================================"
+          echo "$TS_IP"
+          echo
+          echo "RDP ADDRESS:"
+          echo "$TS_IP:3389"
+          echo
+          echo "USERNAME:"
+          echo "rdpuser"
+          echo "======================================"
+
       - name: Check runner
         run: |
           set -euxo pipefail
@@ -46,12 +100,8 @@ jobs:
           df -h /
 
           echo
-          echo "KVM:"
-          if [ -e /dev/kvm ]; then
-            ls -l /dev/kvm || true
-          else
-            echo "KVM unavailable - using TCG software emulation."
-          fi
+          echo "Tailscale IP:"
+          cat "$HOME/tailscale-ip.txt"
 
       - name: Prepare workspace
         run: |
@@ -82,7 +132,6 @@ jobs:
             -o "$HOME/windows-rdp/windows.iso" \
             "$WINDOWS_ISO_URL"
 
-          echo "Windows ISO downloaded:"
           ls -lh "$HOME/windows-rdp/windows.iso"
 
       - name: Extract Windows ISO
@@ -338,3 +387,316 @@ jobs:
 
                       <Name>rdpuser</Name>
                       <DisplayName>RDP User</DisplayName>
+                      <Group>Administrators</Group>
+
+                      <Password>
+                        <Value>$PASSWORD_B64</Value>
+                        <PlainText>false</PlainText>
+                      </Password>
+
+                    </LocalAccount>
+
+                  </LocalAccounts>
+
+                </UserAccounts>
+
+                <AutoLogon>
+
+                  <Enabled>true</Enabled>
+                  <Username>rdpuser</Username>
+
+                  <Password>
+                    <Value>$PASSWORD_B64</Value>
+                    <PlainText>false</PlainText>
+                  </Password>
+
+                  <LogonCount>1</LogonCount>
+
+                </AutoLogon>
+
+                <FirstLogonCommands>
+
+                  <SynchronousCommand
+                    wcm:action="add"
+                    xmlns:wcm="http://schemas.microsoft.com/WMI/2002/State">
+
+                    <Order>1</Order>
+
+                    <CommandLine>
+                      powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Set-Service -Name TermService -StartupType Automatic; Start-Service -Name TermService; Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0; Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'; Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'rdpuser'"
+                    </CommandLine>
+
+                    <Description>
+                      Enable Remote Desktop
+                    </Description>
+
+                  </SynchronousCommand>
+
+                </FirstLogonCommands>
+
+              </component>
+
+            </settings>
+
+            <cpi:offlineImage
+              cpi:source="wim:/sources/install.wim#Windows 11 Pro"
+              xmlns:cpi="urn:schemas-microsoft-com:cpi" />
+
+          </unattend>
+          EOF
+
+          xmllint --noout "$WORK/Autounattend.xml"
+
+          echo "Autounattend.xml is valid."
+
+      - name: Create unattended ISO
+        run: |
+          set -euxo pipefail
+
+          WORK="$HOME/windows-rdp/work"
+
+          xorriso \
+            -as mkisofs \
+            -iso-level 3 \
+            -J \
+            -R \
+            -V "AUTOUNATTEND" \
+            -o "$WORK/autounattend.iso" \
+            "$WORK"
+
+          ls -lh "$WORK/autounattend.iso"
+
+      - name: Create Windows disk
+        run: |
+          set -euxo pipefail
+
+          qemu-img create \
+            -f qcow2 \
+            "$HOME/windows-rdp/work/windows.qcow2" \
+            64G
+
+      - name: Prepare UEFI
+        run: |
+          set -euxo pipefail
+
+          CODE=""
+
+          for f in \
+            /usr/share/OVMF/OVMF_CODE_4M.ms.fd \
+            /usr/share/OVMF/OVMF_CODE_4M.secboot.fd \
+            /usr/share/OVMF/OVMF_CODE.fd
+          do
+            if [ -f "$f" ]; then
+              CODE="$f"
+              break
+            fi
+          done
+
+          VARS=""
+
+          for f in \
+            /usr/share/OVMF/OVMF_VARS_4M.ms.fd \
+            /usr/share/OVMF/OVMF_VARS_4M.fd \
+            /usr/share/OVMF/OVMF_VARS.fd
+          do
+            if [ -f "$f" ]; then
+              VARS="$f"
+              break
+            fi
+          done
+
+          if [ -z "$CODE" ] || [ -z "$VARS" ]; then
+            echo "ERROR: OVMF firmware not found."
+            exit 1
+          fi
+
+          cp "$CODE" \
+            "$HOME/windows-rdp/ovmf/OVMF_CODE.fd"
+
+          cp "$VARS" \
+            "$HOME/windows-rdp/ovmf/OVMF_VARS.fd"
+
+          echo "OVMF_CODE=$HOME/windows-rdp/ovmf/OVMF_CODE.fd" >> "$GITHUB_ENV"
+          echo "OVMF_VARS=$HOME/windows-rdp/ovmf/OVMF_VARS.fd" >> "$GITHUB_ENV"
+
+      - name: Start TPM 2.0
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$HOME/windows-rdp/work/tpm"
+
+          swtpm socket \
+            --tpm2 \
+            --tpmstate dir="$HOME/windows-rdp/work/tpm" \
+            --ctrl type=unixio,path="$HOME/windows-rdp/work/swtpm.sock" \
+            --daemon
+
+          sleep 2
+
+          test -S "$HOME/windows-rdp/work/swtpm.sock"
+
+          echo "TPM 2.0 running."
+
+      - name: Start Windows VM
+        run: |
+          set -euxo pipefail
+
+          WORK="$HOME/windows-rdp/work"
+          TS_IP="$(cat "$HOME/tailscale-ip.txt")"
+
+          echo "Tailscale IP: $TS_IP"
+
+          qemu-system-x86_64 \
+            -accel tcg,thread=multi \
+            -machine q35 \
+            -cpu max \
+            -m 8G \
+            -smp 4 \
+            -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+            -drive if=pflash,format=raw,file="$OVMF_VARS" \
+            -chardev socket,id=chrtpm,path="$WORK/swtpm.sock" \
+            -tpmdev emulator,id=tpm0,chardev=chrtpm \
+            -device tpm-tis,tpmdev=tpm0 \
+            -drive file="$WORK/windows.qcow2",format=qcow2,if=ide \
+            -drive file="$HOME/windows-rdp/windows.iso",media=cdrom,readonly=on \
+            -drive file="$WORK/autounattend.iso",media=cdrom,readonly=on \
+            -netdev user,id=net0,hostfwd=tcp:$TS_IP:3389-:3389 \
+            -device e1000,netdev=net0 \
+            -boot once=d \
+            -display none \
+            -serial file:"$WORK/qemu-serial.log" \
+            -monitor unix:"$WORK/qemu-monitor.sock",server=on,wait=off \
+            -pidfile "$WORK/qemu.pid" \
+            -daemonize
+
+          sleep 5
+
+          if [ ! -f "$WORK/qemu.pid" ]; then
+            echo "ERROR: QEMU failed to start."
+            cat "$WORK/qemu-serial.log" || true
+            exit 1
+          fi
+
+          QEMU_PID="$(cat "$WORK/qemu.pid")"
+
+          if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+            echo "ERROR: QEMU stopped."
+            cat "$WORK/qemu-serial.log" || true
+            exit 1
+          fi
+
+          echo "Windows VM is running."
+          echo "QEMU PID: $QEMU_PID"
+
+      - name: Wait for Windows RDP
+        run: |
+          set -euxo pipefail
+
+          WORK="$HOME/windows-rdp/work"
+          TS_IP="$(cat "$HOME/tailscale-ip.txt")"
+
+          echo "Waiting for Windows RDP..."
+
+          for i in $(seq 1 90); do
+
+            QEMU_PID="$(cat "$WORK/qemu.pid")"
+
+            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+              echo "ERROR: Windows VM stopped."
+              cat "$WORK/qemu-serial.log" || true
+              exit 1
+            fi
+
+            if nc -z "$TS_IP" 3389; then
+              echo
+              echo "======================================"
+              echo "RDP IS READY"
+              echo "======================================"
+              exit 0
+            fi
+
+            echo "[$i/90] RDP not ready..."
+            sleep 40
+
+          done
+
+          echo "ERROR: RDP did not become available."
+
+          cat "$WORK/qemu-serial.log" || true
+
+          exit 1
+
+      - name: Final connection information
+        run: |
+          set -euxo pipefail
+
+          TS_IP="$(cat "$HOME/tailscale-ip.txt")"
+
+          echo
+          echo "======================================"
+          echo "WINDOWS 11 PRO RDP READY"
+          echo "======================================"
+          echo
+          echo "PC:"
+          echo "$TS_IP:3389"
+          echo
+          echo "USERNAME:"
+          echo "rdpuser"
+          echo
+          echo "PASSWORD:"
+          echo "Use your RDP_PASSWORD secret."
+          echo
+          echo "TAILSCALE IP:"
+          echo "$TS_IP"
+          echo
+          echo "KEEP THIS JOB RUNNING."
+          echo "======================================"
+
+      - name: Keep everything alive
+        run: |
+          set -euxo pipefail
+
+          WORK="$HOME/windows-rdp/work"
+          TS_IP="$(cat "$HOME/tailscale-ip.txt")"
+
+          for i in $(seq 1 150); do
+
+            QEMU_PID="$(cat "$WORK/qemu.pid")"
+
+            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+              echo "ERROR: Windows VM stopped."
+              cat "$WORK/qemu-serial.log" || true
+              exit 1
+            fi
+
+            if ! sudo tailscale status >/dev/null 2>&1; then
+              echo "ERROR: Tailscale stopped."
+              exit 1
+            fi
+
+            if ! nc -z "$TS_IP" 3389; then
+              echo "WARNING: RDP port is currently unavailable."
+            fi
+
+            echo "Windows + Tailscale alive: $i/150"
+
+            sleep 20
+
+          done
+
+      - name: Cleanup
+        if: always()
+        run: |
+          set +e
+
+          WORK="$HOME/windows-rdp/work"
+
+          if [ -f "$WORK/qemu.pid" ]; then
+            kill "$(cat "$WORK/qemu.pid")" 2>/dev/null || true
+          fi
+
+          sudo tailscale down 2>/dev/null || true
+
+          pkill -f swtpm 2>/dev/null || true
+
+          echo "Cleanup complete."
