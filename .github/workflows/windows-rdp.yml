@@ -13,9 +13,6 @@ jobs:
 
     steps:
 
-      # ==========================================================
-      # 1. CHECK THE GITHUB MACHINE
-      # ==========================================================
       - name: Check host
         shell: bash
         run: |
@@ -40,22 +37,13 @@ jobs:
           echo
           echo "===== KVM ====="
 
-          if [ -e /dev/kvm ]; then
-            ls -l /dev/kvm || true
-
-            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-              echo "KVM_DEVICE=available"
-            else
-              echo "KVM_DEVICE=permission-denied"
-            fi
+          if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo "KVM device exists and is accessible."
           else
-            echo "KVM_DEVICE=missing"
+            echo "KVM unavailable. Software emulation will be used."
           fi
 
 
-      # ==========================================================
-      # 2. INSTALL QEMU + TPM + UEFI TOOLS
-      # ==========================================================
       - name: Install virtualization software
         shell: bash
         run: |
@@ -70,8 +58,6 @@ jobs:
             swtpm \
             swtpm-tools \
             xorriso \
-            wimtools \
-            p7zip-full \
             curl \
             wget \
             ca-certificates \
@@ -82,10 +68,7 @@ jobs:
             procps
 
 
-      # ==========================================================
-      # 3. VERIFY EVERYTHING
-      # ==========================================================
-      - name: Verify virtualization software
+      - name: Verify QEMU
         shell: bash
         run: |
           set -euxo pipefail
@@ -98,11 +81,11 @@ jobs:
           qemu-img --version
 
           echo
-          echo "===== SWTPM ====="
+          echo "===== TPM ====="
           swtpm --version || true
 
           echo
-          echo "===== OVMF ====="
+          echo "===== UEFI ====="
           ls -lh /usr/share/OVMF/
 
           echo
@@ -110,14 +93,11 @@ jobs:
           ldd "$(command -v qemu-system-x86_64)" | tee /tmp/qemu-ldd.txt
 
           if grep -q "not found" /tmp/qemu-ldd.txt; then
-            echo "::error::QEMU has missing shared libraries."
+            echo "::error::QEMU has missing libraries."
             exit 1
           fi
 
 
-      # ==========================================================
-      # 4. DOWNLOAD REAL MICROSOFT WINDOWS ISO
-      # ==========================================================
       - name: Download Windows ISO
         shell: bash
         env:
@@ -135,7 +115,7 @@ jobs:
               echo "Microsoft ISO URL detected."
               ;;
             *)
-              echo "::error::WINDOWS_ISO_URL does not appear to be the Microsoft ISO URL."
+              echo "::error::The ISO URL is not a Microsoft download URL."
               exit 1
               ;;
           esac
@@ -143,7 +123,6 @@ jobs:
           mkdir -p "$RUNNER_TEMP/windows"
 
           echo "Downloading Windows ISO..."
-          echo "This can take several minutes because the ISO is about 5 GB."
 
           curl \
             --fail \
@@ -154,23 +133,18 @@ jobs:
             --output "$RUNNER_TEMP/windows/windows.iso" \
             "$WINDOWS_ISO_URL"
 
-          if [ ! -s "$RUNNER_TEMP/windows/windows.iso" ]; then
-            echo "::error::Windows ISO download failed or produced an empty file."
-            exit 1
-          fi
+          test -s "$RUNNER_TEMP/windows/windows.iso"
 
           echo
-          echo "===== ISO SIZE ====="
+          echo "ISO downloaded successfully."
+
           du -h "$RUNNER_TEMP/windows/windows.iso"
 
           echo
-          echo "===== ISO SHA256 ====="
+          echo "SHA256:"
           sha256sum "$RUNNER_TEMP/windows/windows.iso"
 
 
-      # ==========================================================
-      # 5. CREATE VM DISK + UEFI
-      # ==========================================================
       - name: Prepare VM
         shell: bash
         run: |
@@ -181,7 +155,7 @@ jobs:
           mkdir -p "$VM"
           mkdir -p "$VM/tpm"
 
-          echo "Creating 50 GB virtual disk..."
+          echo "Creating virtual disk..."
 
           qemu-img create \
             -f qcow2 \
@@ -196,12 +170,9 @@ jobs:
 
           chmod 600 "$VM/OVMF_VARS.fd"
 
-          echo "VM disk and UEFI prepared."
+          echo "VM disk ready."
 
 
-      # ==========================================================
-      # 6. START SOFTWARE TPM
-      # ==========================================================
       - name: Start virtual TPM
         shell: bash
         run: |
@@ -209,22 +180,22 @@ jobs:
 
           VM="$RUNNER_TEMP/windows-vm"
 
-          SOCKET="$VM/tpm/swtpm.sock"
+          TPM_SOCKET="$VM/tpm/swtpm.sock"
 
-          rm -f "$SOCKET"
+          rm -f "$TPM_SOCKET"
 
           echo "Starting TPM 2.0..."
 
           swtpm socket \
             --tpm2 \
             --tpmstate dir="$VM/tpm" \
-            --ctrl type=unixio,path="$SOCKET" \
+            --ctrl type=unixio,path="$TPM_SOCKET" \
             --log level=20 \
             --daemon
 
           sleep 3
 
-          if [ ! -S "$SOCKET" ]; then
+          if [ ! -S "$TPM_SOCKET" ]; then
             echo "::error::TPM socket was not created."
 
             ls -la "$VM/tpm"
@@ -232,12 +203,9 @@ jobs:
             exit 1
           fi
 
-          echo "TPM 2.0 is running."
+          echo "TPM 2.0 started."
 
 
-      # ==========================================================
-      # 7. SELECT KVM OR SOFTWARE EMULATION
-      # ==========================================================
       - name: Select acceleration
         shell: bash
         run: |
@@ -247,14 +215,16 @@ jobs:
              [ -r /dev/kvm ] && \
              [ -w /dev/kvm ]; then
 
-            echo "KVM device exists and is readable/writable."
+            echo "Testing KVM..."
 
             if timeout 5 bash -c 'exec 3<>/dev/kvm'; then
               echo "KVM is usable."
+
               echo "QEMU_ACCEL=-enable-kvm" >> "$GITHUB_ENV"
               echo "QEMU_CPU=host" >> "$GITHUB_ENV"
+
             else
-              echo "KVM exists but cannot be opened."
+              echo "KVM cannot be opened."
               echo "Using software emulation."
 
               echo "QEMU_ACCEL=-accel tcg,thread=multi" >> "$GITHUB_ENV"
@@ -262,19 +232,14 @@ jobs:
             fi
 
           else
-
-            echo "KVM is unavailable."
+            echo "KVM unavailable."
             echo "Using software emulation."
 
             echo "QEMU_ACCEL=-accel tcg,thread=multi" >> "$GITHUB_ENV"
             echo "QEMU_CPU=max" >> "$GITHUB_ENV"
-
           fi
 
 
-      # ==========================================================
-      # 8. START REAL WINDOWS VM
-      # ==========================================================
       - name: Start Windows VM
         shell: bash
         run: |
@@ -284,7 +249,7 @@ jobs:
 
           TPM_SOCKET="$VM/tpm/swtpm.sock"
 
-          echo "Starting QEMU..."
+          echo "Starting real Windows 11 VM..."
 
           qemu-system-x86_64 \
             $QEMU_ACCEL \
@@ -301,4 +266,119 @@ jobs:
             -cdrom "$RUNNER_TEMP/windows/windows.iso" \
             \
             -chardev socket,id=chrtpm,path="$TPM_SOCKET" \
-            -tpmdev emulator,id=tpm0,chardev=chrtpm
+            -tpmdev emulator,id=tpm0,chardev=chrtpm \
+            -device tpm-tis,tpmdev=tpm0 \
+            \
+            -nic user,model=e1000,hostfwd=tcp:127.0.0.1:3389-:3389 \
+            \
+            -display none \
+            -nodefaults \
+            -serial file:"$VM/qemu-serial.log" \
+            -monitor file:"$VM/qemu-monitor.log" \
+            -pidfile "$VM/qemu.pid" \
+            -daemonize
+
+          sleep 5
+
+          if [ ! -f "$VM/qemu.pid" ]; then
+            echo "::error::QEMU did not start."
+            exit 1
+          fi
+
+          PID="$(cat "$VM/qemu.pid")"
+
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "::error::QEMU died."
+
+            echo
+            echo "===== SERIAL LOG ====="
+            cat "$VM/qemu-serial.log" || true
+
+            echo
+            echo "===== MONITOR LOG ====="
+            cat "$VM/qemu-monitor.log" || true
+
+            exit 1
+          fi
+
+          echo
+          echo "======================================"
+          echo "QEMU STARTED SUCCESSFULLY"
+          echo "======================================"
+          echo "PID: $PID"
+
+
+      - name: Check VM
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VM="$RUNNER_TEMP/windows-vm"
+
+          echo "Checking QEMU..."
+
+          for i in $(seq 1 12); do
+
+            if kill -0 "$(cat "$VM/qemu.pid")" 2>/dev/null; then
+              echo "QEMU is alive."
+
+              sleep 5
+            else
+              echo "::error::QEMU stopped."
+
+              echo
+              echo "===== SERIAL LOG ====="
+              cat "$VM/qemu-serial.log" || true
+
+              exit 1
+            fi
+
+          done
+
+          echo
+          echo "Windows VM survived the startup test."
+
+
+      - name: Debug information
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          VM="$RUNNER_TEMP/windows-vm"
+
+          echo "===== VM FILES ====="
+          ls -lah "$VM" 2>/dev/null || true
+
+          echo
+          echo "===== TPM ====="
+          ls -lah "$VM/tpm" 2>/dev/null || true
+
+          echo
+          echo "===== QEMU SERIAL ====="
+          cat "$VM/qemu-serial.log" 2>/dev/null || true
+
+          echo
+          echo "===== QEMU MONITOR ====="
+          cat "$VM/qemu-monitor.log" 2>/dev/null || true
+
+          echo
+          echo "===== PROCESSES ====="
+          ps aux | grep -E 'qemu|swtpm' | grep -v grep || true
+
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          VM="$RUNNER_TEMP/windows-vm"
+
+          if [ -f "$VM/qemu.pid" ]; then
+            kill "$(cat "$VM/qemu.pid")" 2>/dev/null || true
+          fi
+
+          pkill -f swtpm 2>/dev/null || true
+
+          echo "Cleanup complete."
